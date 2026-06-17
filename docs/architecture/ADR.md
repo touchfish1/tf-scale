@@ -1,29 +1,28 @@
 # Architecture Decision Records
 
-## ADR-001: Use a pluggable network backend with WireGuard first
+## ADR-001: Use a pluggable network backend with a custom backend first
 
 Status: Accepted
 
 Decision:
 
-Define a backend boundary for encrypted node-to-node traffic. Use WireGuard as
-the first MVP backend, but keep the control plane and product model independent
-from WireGuard-specific configuration.
+Define a backend boundary for encrypted node-to-node traffic. Use a
+self-developed userspace backend as the first MVP backend, but keep the control
+plane and product model independent from backend-specific configuration.
 
 Rationale:
 
-- Mature and widely deployed.
-- Strong security model.
-- Good Linux kernel support.
-- Userspace options exist for macOS and Windows.
-- Lets tf-scale focus on coordination, policy, DNS, routing, and product
-  workflow instead of custom cryptography.
-- Leaves room for EasyTier or a self-developed backend without replacing the
-  control plane.
+- Avoids requiring users to install WireGuard system tooling for v0.1.
+- Gives tf-scale control over product behavior, packet framing, diagnostics,
+  and future relay/NAT behavior.
+- Keeps the backend boundary explicit so WireGuard or EasyTier can still be
+  added later without replacing the control plane.
+- Lets the MVP validate the tf-scale control plane and agent lifecycle against
+  the backend model that will be owned by the project.
 
 Constraints:
 
-- WireGuard-specific fields and tooling must stay inside the WireGuard backend.
+- Backend-specific fields and tooling must stay inside backend crates.
 - Shared API and database models should use backend-neutral concepts such as
   nodes, peers, credentials, endpoints, routes, and capabilities.
 - Backend implementations must explicitly declare capabilities so the control

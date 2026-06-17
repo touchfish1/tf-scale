@@ -2,10 +2,10 @@
 
 tf-scale is a self-hosted mesh networking system inspired by Tailscale.
 It uses a pluggable network backend for encrypted overlay connectivity.
-WireGuard is the first backend for the MVP, while the control plane keeps
-device registration, IP allocation, hostname management, peer discovery, ACLs,
-NAT traversal, and relay fallback backend-agnostic so EasyTier or a custom
-backend can be added later.
+The MVP starts with a self-developed userspace backend, while the control plane
+keeps device registration, IP allocation, hostname management, peer discovery,
+ACLs, NAT traversal, and relay fallback backend-agnostic so WireGuard, EasyTier,
+or other backends can be added later.
 
 ## Goals
 
@@ -15,8 +15,8 @@ backend can be added later.
 - Prefer peer-to-peer encrypted backend connections whenever possible.
 - Fall back to DERP-like encrypted relay when direct connectivity fails.
 - Keep the control plane unable to decrypt user traffic.
-- Keep WireGuard-specific details behind a backend boundary so future
-  EasyTier or custom backends do not require a control plane rewrite.
+- Keep backend-specific details behind a backend boundary so future WireGuard
+  or EasyTier backends do not require a control plane rewrite.
 - Provide a clear path from a small self-hosted MVP to a managed multi-tenant
   product.
 
@@ -47,10 +47,10 @@ backend can be added later.
 
 | Layer | Choice | Notes |
 | --- | --- | --- |
-| Network backend | Pluggable, WireGuard first | End-to-end encrypted node traffic |
+| Network backend | Self-developed userspace backend first | End-to-end encrypted node traffic |
 | Agent | Rust | System-level networking, memory safety, and long-running daemon reliability |
 | Control plane | Rust | Shared protocol models with the agent and relay |
-| API | gRPC plus HTTP REST | Streaming agent updates and admin APIs |
+| API | HTTP REST first, gRPC later | v0.1 uses polling; streaming can follow |
 | Database | SQLite for MVP, PostgreSQL for production | Start simple, scale later |
 | State cache | Redis optional | Online status, heartbeats, relay health |
 | Frontend | React plus Vite | Admin console for devices, ACLs, routes |
@@ -63,6 +63,8 @@ backend can be added later.
 
 - [Technical Plan](docs/TECHNICAL_PLAN.md)
 - [MVP Scope](docs/product/MVP.md)
+- [v0.1 Detailed Design](docs/product/V0_1_DETAILED_DESIGN.md)
+- [v0.1 Task Breakdown](docs/development/V0_1_TASK_BREAKDOWN.md)
 - [Architecture Decision Records](docs/architecture/ADR.md)
 - [Rust Stack](docs/architecture/RUST_STACK.md)
 - [Data Model](docs/architecture/DATA_MODEL.md)
@@ -85,7 +87,7 @@ tf-scale/
     tfscale-nat/         # STUN and NAT probing
     tfscale-route/       # OS routing integration
     tfscale-net/         # network backend abstraction
-    tfscale-wg/          # WireGuard backend implementation
+    tfscale-custom/      # self-developed userspace backend implementation
   proto/                 # gRPC contracts
   web/                   # admin console
   deploy/                # deployment manifests
@@ -100,8 +102,8 @@ The first useful milestone is a minimal two-device mesh:
 2. The control plane allocates a stable virtual IP.
 3. The agent configures the selected network backend locally.
 4. The control plane distributes a peer map.
-5. Two devices can ping each other over the overlay network.
-6. Devices can be addressed by custom hostnames through MagicDNS.
+5. Two directly reachable devices can ping each other over the overlay network.
+6. MagicDNS and custom hostnames follow in v0.2.
 
 See [MVP Scope](docs/product/MVP.md) for details.
 

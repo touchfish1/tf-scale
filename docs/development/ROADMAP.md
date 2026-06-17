@@ -4,7 +4,10 @@
 
 - Rust workspace and repository skeleton.
 - Network backend abstraction.
-- WireGuard backend implementation.
+- Custom userspace backend skeleton.
+- Linux and macOS support.
+- HTTP polling for agent registration, heartbeat, and network maps.
+- Userspace TUN adapter design.
 - Control plane service.
 - SQLite persistence.
 - Auth key creation.
@@ -13,7 +16,8 @@
 - Agent identity persistence.
 - Backend interface setup.
 - Peer map generation.
-- Two Linux or macOS devices can ping each other by overlay IP.
+- One Linux and one macOS device can ping each other by overlay IP when
+  directly reachable.
 
 ## v0.2: Hostnames and MagicDNS
 
@@ -70,12 +74,13 @@
 ## v0.8: Windows Support
 
 - Windows agent packaging.
-- WireGuard userspace backend integration.
+- Custom backend Windows integration.
 - Route and DNS configuration.
 - Service installation.
 
 ## Later: Alternative Backends
 
+- WireGuard backend prototype.
 - EasyTier backend prototype.
 - Backend capability negotiation.
 - Backend-specific diagnostics.

@@ -5,22 +5,24 @@
 tf-scale follows the Tailscale-style architecture:
 
 - The network backend is a pluggable data-plane boundary.
-- WireGuard is the first backend for the MVP.
+- A self-developed userspace backend is the first backend for the MVP.
 - The tf-scale control plane coordinates identity, devices, IPAM, hostnames,
   peer discovery, routes, ACLs, and relay selection.
 - Node traffic is end-to-end encrypted by the selected backend.
 - Relay services forward encrypted packets only and do not decrypt user traffic.
 
-The MVP should not implement a custom VPN encryption protocol. The custom work
-belongs in coordination, product workflow, policy, operational tooling, and a
-stable backend interface. Future EasyTier or self-developed backends should
-plug into that interface without changing the control plane domain model.
+The MVP owns a minimal custom data plane, but keeps it narrowly scoped:
+userspace TUN, peer sessions, packet framing, encryption, and direct endpoint
+transport. Product behavior still belongs in coordination, policy, operational
+tooling, and a stable backend interface. Future WireGuard or EasyTier backends
+should plug into that interface without changing the control plane domain
+model.
 
 ## Network Backend Boundary
 
 The agent must depend on a `NetworkBackend`-style interface instead of calling
-WireGuard-specific code directly. The first implementation can be WireGuard,
-but core concepts should remain backend-neutral:
+the custom backend directly. The first implementation is the tf-scale custom
+backend, but core concepts should remain backend-neutral:
 
 - `Node`
 - `VirtualNetwork`
@@ -40,9 +42,9 @@ Suggested backend responsibilities:
 - Declare capabilities such as relay support, NAT traversal, kernel TUN,
   userspace TUN, dynamic peer discovery, and endpoint ranking.
 
-WireGuard-specific fields such as `allowed_ips`, `persistent_keepalive`, and
-interface names like `wg0` must stay inside the WireGuard backend. EasyTier or
-custom backend fields should follow the same rule.
+Backend-specific fields such as custom session keys, packet framing versions,
+WireGuard `allowed_ips`, EasyTier network names, or interface names must stay
+inside their backend implementation.
 
 ## Core Components
 
@@ -73,14 +75,15 @@ Responsibilities:
 - Assign virtual IPs.
 - Configure peer endpoints.
 - Configure system routes.
-- Run a local DNS resolver or DNS proxy.
+- Run a local DNS resolver or DNS proxy after v0.1.
 - Probe local, public, and relay connectivity.
-- Maintain a streaming control connection for peer map updates.
+- Poll the control plane for peer map updates in v0.1; streaming can replace
+  polling later.
 - Apply key rotation and device revocation events.
 
-For the WireGuard backend, Linux should prefer kernel WireGuard when available.
-macOS and Windows can use userspace WireGuard implementations where needed.
-Alternative backends must stay behind the same agent-facing interface.
+For the custom backend, Linux and macOS should use a userspace TUN interface in
+v0.1. WireGuard and EasyTier can be added later as alternative backend
+implementations behind the same agent-facing interface.
 
 ### Relay Service
 
@@ -111,16 +114,20 @@ quickly without depending on frontend work.
 
 ## API Shape
 
-Use both gRPC and HTTP:
+v0.1 uses HTTP JSON APIs only:
 
-- gRPC for agent registration, heartbeat, and streaming network map updates.
+- HTTP REST for agent registration, heartbeat, and network map polling.
 - HTTP REST for admin APIs and browser-based management.
+- gRPC streaming can be introduced after the first mesh works.
 
-Suggested service groups:
+Initial endpoint groups:
 
 - `AuthService`
 - `DeviceService`
 - `NetworkMapService`
+
+Later endpoint groups:
+
 - `RouteService`
 - `DnsService`
 - `AclService`
@@ -195,8 +202,9 @@ Connection preference order:
 3. IPv6 endpoint when available.
 4. Relay fallback.
 
-The initial MVP can skip advanced NAT traversal and support direct endpoints
-first. UDP hole punching and relay fallback should land soon after.
+The initial MVP skips advanced NAT traversal and supports direct endpoints
+first. UDP hole punching and relay fallback should land after the first
+Linux/macOS overlay ping works.
 
 ## Subnet Routes
 
@@ -230,7 +238,6 @@ MVP deployment:
 
 - Single control plane container.
 - SQLite database volume.
-- Single relay container.
 - CLI and agent binaries installed manually.
 
 Production deployment:

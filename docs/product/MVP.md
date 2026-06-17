@@ -6,8 +6,7 @@ Deliver the smallest useful tf-scale network:
 
 - Two or more devices can join the same network.
 - Devices receive stable virtual IPs.
-- Devices can communicate over the WireGuard backend.
-- Devices can use custom hostnames.
+- Devices can communicate over the custom userspace backend.
 - Operators can inspect and remove devices.
 
 ## In Scope
@@ -27,7 +26,7 @@ Deliver the smallest useful tf-scale network:
 
 ### Agent
 
-- Generate WireGuard backend credentials.
+- Generate custom backend credentials.
 - Register using an auth key.
 - Persist device identity.
 - Configure the local backend interface.
@@ -35,12 +34,6 @@ Deliver the smallest useful tf-scale network:
 - Receive and apply peer map updates.
 - Basic heartbeat.
 - Linux and macOS support first.
-
-### DNS
-
-- Store one hostname per device.
-- Resolve `hostname.mesh` to the device overlay IP.
-- Provide a minimal local DNS resolver or DNS proxy.
 
 ### CLI
 
@@ -59,6 +52,7 @@ Deliver the smallest useful tf-scale network:
 - Windows client.
 - Mobile clients.
 - Complex ACLs.
+- MagicDNS and local DNS resolver.
 - Exit nodes.
 - Subnet routers.
 - Multi-region relays.
@@ -73,10 +67,9 @@ Deliver the smallest useful tf-scale network:
 3. Register two agents.
 4. Confirm each device receives a unique overlay IP.
 5. Confirm each device sees the other device in its peer map.
-6. Ping one device from the other by overlay IP.
-7. Rename a device.
-8. Resolve the renamed device through `hostname.mesh`.
-9. Delete a device and confirm it disappears from peer maps.
+6. Confirm Linux and macOS agents configure `tfscale0`.
+7. Ping one directly reachable device from the other by overlay IP.
+8. Delete a device and confirm it disappears from peer maps.
 
 ## First Demo Script
 
@@ -86,5 +79,7 @@ tfscalectl auth-key create
 tfscale-agent up --login-key <key>
 tfscalectl device list
 ping 100.64.0.2
-ping devbox.mesh
 ```
+
+See [v0.1 Detailed Design](V0_1_DETAILED_DESIGN.md) for the first-stage
+implementation plan.

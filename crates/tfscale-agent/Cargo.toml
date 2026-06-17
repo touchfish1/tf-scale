@@ -1,0 +1,24 @@
+[package]
+name = "tfscale-agent"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[[bin]]
+name = "tfscale-agent"
+path = "src/main.rs"
+
+[dependencies]
+anyhow.workspace = true
+clap.workspace = true
+reqwest.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tfscale-core = { path = "../tfscale-core" }
+tfscale-custom = { path = "../tfscale-custom" }
+tfscale-net = { path = "../tfscale-net" }
+tokio.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+uuid.workspace = true

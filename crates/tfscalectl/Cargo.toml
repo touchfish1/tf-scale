@@ -1,0 +1,19 @@
+[package]
+name = "tfscalectl"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[[bin]]
+name = "tfscalectl"
+path = "src/main.rs"
+
+[dependencies]
+anyhow.workspace = true
+clap.workspace = true
+reqwest.workspace = true
+serde_json.workspace = true
+tfscale-core = { path = "../tfscale-core" }
+tokio.workspace = true
+tracing-subscriber.workspace = true

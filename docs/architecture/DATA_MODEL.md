@@ -69,8 +69,8 @@ updated_at
 Examples:
 
 ```text
-backend_type = wireguard
-capabilities = supports_relay, supports_kernel_tun, supports_static_peers
+backend_type = tfscale
+capabilities = supports_userspace_tun, supports_static_peers
 
 backend_type = easytier
 capabilities = supports_relay, supports_nat_traversal, supports_dynamic_peers
@@ -81,9 +81,9 @@ Rules:
 - `capabilities` and `config` can start as JSON for the MVP.
 - The control plane can read capabilities, but should not interpret
   backend-private fields unless a product feature needs them.
-- A future migration from WireGuard to EasyTier should create a new backend
-  configuration and roll devices gradually instead of changing all device
-  records in place.
+- A future migration from the custom backend to WireGuard or EasyTier should
+  create a new backend configuration and roll devices gradually instead of
+  changing all device records in place.
 
 ## devices
 
@@ -111,16 +111,16 @@ deleted_at
 
 Notes:
 
-- `backend_type` identifies the selected network backend, such as `wireguard`
-  for the MVP and `easytier` for a future implementation.
+- `backend_type` identifies the selected network backend, such as `tfscale`
+  for the MVP and `wireguard` or `easytier` for future implementations.
 - `backend_public_credential` is safe to store in the control plane.
 - Backend private credentials must never leave the device.
 - `deleted_at` supports revocation audit history.
 
-Backend-specific details such as WireGuard `allowed_ips`, EasyTier network
-names, relay preferences, or implementation-specific endpoint metadata should
-not be added directly to `devices`. Store them in backend configuration records
-or derive them inside the backend implementation.
+Backend-specific details such as custom session keys, WireGuard `allowed_ips`,
+EasyTier network names, relay preferences, or implementation-specific endpoint
+metadata should not be added directly to `devices`. Store them in backend
+configuration records or derive them inside the backend implementation.
 
 ## auth_keys
 
