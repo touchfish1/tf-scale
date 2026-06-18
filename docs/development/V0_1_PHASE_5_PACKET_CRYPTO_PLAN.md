@@ -13,6 +13,27 @@ loop; Phase 6 will connect these helpers to transport.
 - Peer sessions are stored by device ID and overlay IP.
 - TUN read/write boundaries exist but no packet loop consumes them yet.
 
+## Current Status
+
+Implemented in the current development branch:
+
+- Binary frame header encode/decode with version, message type, source,
+  destination, nonce, and ciphertext.
+- XChaCha20Poly1305 seal/open helpers with header bytes as associated data.
+- X25519 + HKDF-SHA256 peer session key derivation.
+- Send nonce state and 64-packet replay window.
+- Peer public credentials are decoded into backend runtime crypto material when
+  peer maps are applied.
+- Unit tests cover frame validation, round-trip encryption, tamper rejection,
+  replay rejection, and unrelated session rejection.
+
+Still remaining:
+
+- Wire frame helpers into a TUN packet loop.
+- Bind UDP sockets and route encrypted frames to peer endpoints.
+- Use real local/peer device IDs from the transport runtime when creating
+  `PeerCryptoSession` values.
+
 ## Dependency Choices
 
 Use well-reviewed RustCrypto crates:
@@ -113,6 +134,11 @@ Extend `StoredPeerSession` or runtime-only peer state with:
 
 `apply_peer_map()` should rebuild runtime crypto sessions when peers change.
 Persisted peer data should stay simple and control-plane-shaped.
+
+The first implementation decodes and validates peer public credentials into
+runtime crypto material. Full `PeerCryptoSession` construction is deferred until
+Phase 6, where the transport runtime owns local/peer frame IDs and packet
+direction.
 
 ## Error Handling
 

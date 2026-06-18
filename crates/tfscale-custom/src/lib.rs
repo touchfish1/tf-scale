@@ -16,9 +16,13 @@ use tfscale_net::{
 use uuid::Uuid;
 use x25519_dalek::{PublicKey, StaticSecret};
 
+mod crypto;
+mod frame;
+mod nonce;
 mod platform;
 mod tun;
 
+use crypto::decode_public_credential;
 use tun::{TunConfig, TunDevice, TunStatus};
 
 const STATE_VERSION: u32 = 1;
@@ -177,8 +181,14 @@ struct RuntimeState {
     persisted: CustomBackendState,
     peers_by_device: HashMap<String, StoredPeerSession>,
     peers_by_overlay_ip: HashMap<Ipv4Addr, String>,
+    peer_crypto_material_by_device: HashMap<String, PeerCryptoMaterial>,
     tun_status: Option<TunStatus>,
     tun_device: Option<TunDevice>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct PeerCryptoMaterial {
+    public_key: [u8; 32],
 }
 
 impl RuntimeState {
@@ -193,11 +203,21 @@ impl RuntimeState {
             .iter()
             .map(|peer| (peer.overlay_ip, peer.device_id.clone()))
             .collect();
+        let peer_crypto_material_by_device = persisted
+            .peers
+            .iter()
+            .filter_map(|peer| {
+                decode_public_credential(&peer.public_key)
+                    .ok()
+                    .map(|public_key| (peer.device_id.clone(), PeerCryptoMaterial { public_key }))
+            })
+            .collect();
 
         Self {
             persisted,
             peers_by_device,
             peers_by_overlay_ip,
+            peer_crypto_material_by_device,
             tun_status: None,
             tun_device: None,
         }
@@ -431,12 +451,13 @@ impl NetworkBackend for CustomBackend {
             interface_name: self.interface_name.clone(),
             healthy: tun_configured && tun_io_ready,
             message: Some(format!(
-                "custom backend state: credentials={} local_config={} peers={} peer_indexes=device:{} overlay:{} tun_configured={} tun_io_ready={} tun_message={} data_plane=not_started",
+                "custom backend state: credentials={} local_config={} peers={} peer_indexes=device:{} overlay:{} crypto_peers={} tun_configured={} tun_io_ready={} tun_message={} data_plane=not_started",
                 has_credentials,
                 has_local_config,
                 runtime.persisted.peers.len(),
                 runtime.peers_by_device.len(),
                 runtime.peers_by_overlay_ip.len(),
+                runtime.peer_crypto_material_by_device.len(),
                 tun_configured,
                 tun_io_ready,
                 tun_message
@@ -640,6 +661,7 @@ mod tests {
         let message = status.message.expect("status message");
 
         assert!(!status.healthy);
+        assert!(message.contains("crypto_peers=1"));
         assert!(message.contains("tun_configured=false"));
         assert!(message.contains("tun_io_ready=false"));
         assert!(message.contains("TUN setup skipped"));

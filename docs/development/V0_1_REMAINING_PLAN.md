@@ -144,7 +144,9 @@ Acceptance:
 
 ## Phase 5: Packet Framing and Crypto
 
-Status: detailed design drafted; implementation not started.
+Status: core packet framing, crypto helpers, nonce handling, and runtime peer
+credential material are implemented. UDP and TUN packet-loop integration remain
+for Phase 6.
 
 Detailed requirements and implementation steps are tracked in
 [v0.1 Phase 5 Packet Framing and Crypto Plan](V0_1_PHASE_5_PACKET_CRYPTO_PLAN.md).
