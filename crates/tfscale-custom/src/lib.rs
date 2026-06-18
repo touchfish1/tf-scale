@@ -25,7 +25,8 @@ mod transport;
 mod tun;
 
 use crypto::{PeerCryptoSession, decode_public_credential};
-use frame::FrameDeviceId;
+use frame::{EncodedFrame, FrameDeviceId};
+use packet::ipv4_destination;
 use transport::{TransportRuntime, select_udp_endpoint};
 use tun::{TunConfig, TunDevice, TunStatus};
 
@@ -148,6 +149,22 @@ impl CustomBackend {
             .transport = Some(transport);
         Ok(())
     }
+
+    #[allow(dead_code)]
+    fn send_overlay_packet(&self, packet: &[u8]) -> Result<usize> {
+        self.state
+            .lock()
+            .map_err(|error| BackendError::CommandFailed(error.to_string()))?
+            .send_overlay_packet(packet)
+    }
+
+    #[allow(dead_code)]
+    fn receive_overlay_packet(&self, buffer: &mut [u8]) -> Result<Option<Vec<u8>>> {
+        self.state
+            .lock()
+            .map_err(|error| BackendError::CommandFailed(error.to_string()))?
+            .receive_overlay_packet(buffer)
+    }
 }
 
 impl Default for CustomBackend {
@@ -203,6 +220,7 @@ struct RuntimeState {
     peers_by_overlay_ip: HashMap<Ipv4Addr, String>,
     peer_crypto_material_by_device: HashMap<String, PeerCryptoMaterial>,
     peer_udp_endpoints_by_device: HashMap<String, Endpoint>,
+    peer_device_by_frame_id: HashMap<FrameDeviceId, String>,
     peer_transport_sessions_by_device: HashMap<String, PeerTransportSession>,
     tun_status: Option<TunStatus>,
     tun_device: Option<TunDevice>,
@@ -253,6 +271,15 @@ impl RuntimeState {
                     .map(|endpoint| (peer.device_id.clone(), endpoint))
             })
             .collect();
+        let peer_device_by_frame_id = persisted
+            .peers
+            .iter()
+            .filter_map(|peer| {
+                FrameDeviceId::from_device_id(&peer.device_id)
+                    .ok()
+                    .map(|frame_id| (frame_id, peer.device_id.clone()))
+            })
+            .collect();
         let peer_transport_sessions_by_device =
             build_peer_transport_sessions(&persisted).unwrap_or_default();
 
@@ -262,10 +289,89 @@ impl RuntimeState {
             peers_by_overlay_ip,
             peer_crypto_material_by_device,
             peer_udp_endpoints_by_device,
+            peer_device_by_frame_id,
             peer_transport_sessions_by_device,
             tun_status: None,
             tun_device: None,
             transport: None,
+        }
+    }
+
+    fn send_overlay_packet(&mut self, packet: &[u8]) -> Result<usize> {
+        let destination = ipv4_destination(packet)?;
+        let device_id = self
+            .peers_by_overlay_ip
+            .get(&destination)
+            .ok_or_else(|| {
+                BackendError::CommandFailed(format!(
+                    "no peer session for overlay destination: {destination}"
+                ))
+            })?
+            .clone();
+        let session = self
+            .peer_transport_sessions_by_device
+            .get_mut(&device_id)
+            .ok_or_else(|| {
+                BackendError::CommandFailed(format!(
+                    "peer transport session is not ready: {device_id}"
+                ))
+            })?;
+        let transport = self
+            .transport
+            .as_mut()
+            .ok_or_else(|| BackendError::CommandFailed("UDP transport is not bound".to_string()))?;
+
+        transport.send_packet(&session.endpoint, &mut session.crypto, packet)
+    }
+
+    fn receive_overlay_packet(&mut self, buffer: &mut [u8]) -> Result<Option<Vec<u8>>> {
+        let Some((received, _)) = self
+            .transport
+            .as_mut()
+            .ok_or_else(|| BackendError::CommandFailed("UDP transport is not bound".to_string()))?
+            .receive_frame(buffer)?
+        else {
+            return Ok(None);
+        };
+
+        let decoded = match EncodedFrame::decode(&buffer[..received]) {
+            Ok(decoded) => decoded,
+            Err(error) => {
+                if let Some(transport) = self.transport.as_mut() {
+                    transport.record_rx_drop();
+                }
+                return Err(error);
+            }
+        };
+        let device_id = self
+            .peer_device_by_frame_id
+            .get(&decoded.header.source)
+            .ok_or_else(|| {
+                if let Some(transport) = self.transport.as_mut() {
+                    transport.record_rx_drop();
+                }
+                BackendError::CommandFailed("missing peer session for frame source".to_string())
+            })?
+            .clone();
+        let session = self
+            .peer_transport_sessions_by_device
+            .get_mut(&device_id)
+            .ok_or_else(|| {
+                if let Some(transport) = self.transport.as_mut() {
+                    transport.record_rx_drop();
+                }
+                BackendError::CommandFailed(format!(
+                    "peer transport session is not ready: {device_id}"
+                ))
+            })?;
+        match session.crypto.open(&buffer[..received]) {
+            Ok(packet) => Ok(Some(packet)),
+            Err(error) => {
+                if let Some(transport) = self.transport.as_mut() {
+                    transport.record_rx_drop();
+                }
+                Err(error)
+            }
         }
     }
 }
@@ -859,6 +965,128 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn sends_overlay_packet_to_peer_udp_endpoint() {
+        let state_path = temp_state_path("send-overlay-packet");
+        let backend = test_backend(&state_path);
+        let mut peer_receiver = TransportRuntime::bind(0).expect("peer transport");
+        let local_device_id = DeviceId::new().to_string();
+        let peer_device_id = DeviceId::new().to_string();
+
+        backend
+            .ensure_credentials()
+            .await
+            .expect("backend credentials");
+        backend
+            .apply_local_config(LocalBackendConfig {
+                device_id: local_device_id,
+                interface_name: "tfscale0".to_string(),
+                overlay_ip: Ipv4Addr::new(100, 64, 0, 2),
+                listen_port: 0,
+            })
+            .await
+            .expect("local config");
+        backend
+            .apply_peer_map(vec![test_peer_with_endpoint(
+                &peer_device_id,
+                Ipv4Addr::new(100, 64, 0, 3),
+                endpoint(
+                    Ipv4Addr::LOCALHOST,
+                    peer_receiver.local_addr().expect("peer addr").port(),
+                ),
+            )])
+            .await
+            .expect("peer map");
+
+        let sent = backend
+            .send_overlay_packet(&ipv4_packet(
+                Ipv4Addr::new(100, 64, 0, 2),
+                Ipv4Addr::new(100, 64, 0, 3),
+            ))
+            .expect("send overlay packet");
+
+        assert!(sent > 0);
+        let mut buffer = [0u8; 1500];
+        let received = receive_with_retry(&mut peer_receiver, &mut buffer).expect("received frame");
+        assert_eq!(received, sent);
+        let status = backend.status().await.expect("backend status");
+        let message = status.message.expect("status message");
+        assert!(message.contains("tx_packets=1"));
+
+        cleanup_state(&state_path);
+    }
+
+    #[tokio::test]
+    async fn receives_overlay_packet_from_peer_udp_endpoint() {
+        let state_path = temp_state_path("receive-overlay-packet");
+        let backend = test_backend(&state_path);
+        let local_device_id = DeviceId::new().to_string();
+        let peer_device_id = DeviceId::new().to_string();
+        let peer_identity = generate_identity();
+
+        let local_credential = backend
+            .ensure_credentials()
+            .await
+            .expect("backend credentials");
+        backend
+            .apply_local_config(LocalBackendConfig {
+                device_id: local_device_id.clone(),
+                interface_name: "tfscale0".to_string(),
+                overlay_ip: Ipv4Addr::new(100, 64, 0, 2),
+                listen_port: 0,
+            })
+            .await
+            .expect("local config");
+        backend
+            .apply_peer_map(vec![PeerConfig {
+                public_credential: BackendCredential {
+                    public: peer_identity.public_key.clone(),
+                },
+                ..test_peer_with_endpoint(
+                    &peer_device_id,
+                    Ipv4Addr::new(100, 64, 0, 3),
+                    endpoint(Ipv4Addr::LOCALHOST, 51820),
+                )
+            }])
+            .await
+            .expect("peer map");
+
+        let mut peer_crypto = PeerCryptoSession::new(
+            decode_key(&peer_identity.private_key).expect("peer private key"),
+            &peer_identity.public_key,
+            &local_credential.public,
+            FrameDeviceId::from_device_id(&peer_device_id).expect("peer frame id"),
+            FrameDeviceId::from_device_id(&local_device_id).expect("local frame id"),
+        )
+        .expect("peer crypto");
+        let packet = ipv4_packet(Ipv4Addr::new(100, 64, 0, 3), Ipv4Addr::new(100, 64, 0, 2));
+        let frame = peer_crypto.seal(&packet).expect("sealed packet");
+        let mut peer_transport = TransportRuntime::bind(0).expect("peer transport");
+        let local_endpoint = backend
+            .local_endpoints()
+            .await
+            .expect("local endpoints")
+            .into_iter()
+            .next()
+            .expect("local endpoint");
+
+        peer_transport
+            .send_frame(&local_endpoint, &frame)
+            .expect("send frame");
+
+        let mut buffer = [0u8; 1500];
+        let opened =
+            receive_backend_packet_with_retry(&backend, &mut buffer).expect("received packet");
+
+        assert_eq!(opened, packet);
+        let status = backend.status().await.expect("backend status");
+        let message = status.message.expect("status message");
+        assert!(message.contains("rx_packets=1"));
+        assert!(message.contains("rx_drops=0"));
+
+        cleanup_state(&state_path);
+    }
+
+    #[tokio::test]
     async fn shutdown_without_tun_device_succeeds() {
         let state_path = temp_state_path("shutdown-no-tun");
         let backend = test_backend(&state_path);
@@ -922,5 +1150,41 @@ mod tests {
             port,
             protocol: TransportProtocol::Udp,
         }
+    }
+
+    fn receive_with_retry(runtime: &mut TransportRuntime, buffer: &mut [u8]) -> Option<usize> {
+        for _ in 0..10 {
+            if let Some((received, _)) = runtime.receive_frame(buffer).expect("receive frame") {
+                return Some(received);
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        None
+    }
+
+    fn receive_backend_packet_with_retry(
+        backend: &CustomBackend,
+        buffer: &mut [u8],
+    ) -> Option<Vec<u8>> {
+        for _ in 0..10 {
+            if let Some(packet) = backend
+                .receive_overlay_packet(buffer)
+                .expect("receive overlay packet")
+            {
+                return Some(packet);
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        None
+    }
+
+    fn ipv4_packet(source: Ipv4Addr, destination: Ipv4Addr) -> Vec<u8> {
+        let mut packet = vec![0u8; 20];
+        packet[0] = 0x45;
+        packet[8] = 64;
+        packet[9] = 1;
+        packet[12..16].copy_from_slice(&source.octets());
+        packet[16..20].copy_from_slice(&destination.octets());
+        packet
     }
 }

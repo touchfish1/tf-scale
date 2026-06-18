@@ -37,12 +37,18 @@ Implemented in the current development branch:
   device IDs, credentials, and LAN UDP endpoints.
 - `transport.rs` can send and receive encrypted synthetic IP packets over
   loopback UDP in tests.
+- Backend-level helpers can route plaintext IPv4 packets to peer UDP endpoints
+  by overlay destination and update transmit counters.
+- Backend-level helpers can receive encrypted UDP frames, select the peer crypto
+  session by frame source, decrypt plaintext packets, and update receive
+  counters.
 
 Still remaining:
 
-- Route TUN packets through crypto sessions to selected UDP endpoints.
-- Decrypt received UDP frames and write plaintext packets back to TUN.
 - Add transport task lifecycle and cancellation around the blocking TUN loop.
+- Connect the tested packet helpers to `TunDevice::read_packet()` and
+  `TunDevice::write_packet()`.
+- Run privileged Linux validation with real TUN devices.
 
 ## Architecture
 
@@ -255,9 +261,10 @@ Manual validation:
 6. Add synthetic UDP transport tests using loopback sockets.
 7. Construct `PeerCryptoSession` values from local identity and peer map.
 8. Add encrypted synthetic packet send/receive tests over loopback UDP.
-9. Connect TUN read/write loops behind runtime start/stop.
-10. Update backend status and shutdown cleanup.
-11. Add Linux manual validation notes for UDP traffic.
+9. Add backend-level plaintext packet send and encrypted frame receive helpers.
+10. Connect TUN read/write loops behind runtime start/stop.
+11. Update backend status and shutdown cleanup.
+12. Add Linux manual validation notes for UDP traffic.
 
 ## Acceptance Criteria
 

@@ -181,8 +181,9 @@ Acceptance:
 
 Status: endpoint publication, UDP socket binding, peer endpoint selection,
 transport status fields, IPv4 destination parsing, real frame-ID crypto session
-construction, and encrypted loopback UDP packet tests are implemented. TUN
-packet-loop wiring remains.
+construction, encrypted loopback UDP packet tests, and backend-level packet
+send/receive helpers are implemented. TUN packet-loop wiring and privileged
+Linux validation remain.
 
 Detailed requirements and implementation steps are tracked in
 [v0.1 Phase 6 UDP Peer Transport Plan](V0_1_PHASE_6_UDP_TRANSPORT_PLAN.md).

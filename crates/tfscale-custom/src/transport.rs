@@ -114,6 +114,10 @@ impl TransportRuntime {
         }
     }
 
+    pub fn record_rx_drop(&mut self) {
+        self.status.rx_drops += 1;
+    }
+
     pub fn local_addr(&self) -> Result<SocketAddr> {
         self.socket
             .local_addr()
