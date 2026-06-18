@@ -1,3 +1,5 @@
+mod dns;
+
 use anyhow::{Context, Result, bail};
 use clap::{Parser, Subcommand};
 use serde::{Deserialize, Serialize};
@@ -23,6 +25,8 @@ use uuid::Uuid;
 
 const DEFAULT_INTERFACE_NAME: &str = "tfscale0";
 const DEFAULT_LISTEN_PORT: u16 = 51820;
+const DEFAULT_DNS_LISTEN: &str = "127.0.0.1:1053";
+const DEFAULT_DNS_SUFFIX: &str = "mesh";
 
 #[derive(Debug, Parser)]
 #[command(name = "tfscale-agent", version, about = "tf-scale node agent")]
@@ -42,6 +46,9 @@ enum Command {
 
         #[arg(long, default_value = "http://127.0.0.1:8080")]
         control_url: String,
+
+        #[arg(long, default_value = DEFAULT_DNS_LISTEN)]
+        dns_listen: SocketAddr,
     },
     Down,
     Status {
@@ -60,9 +67,10 @@ async fn main() -> Result<()> {
         Command::Up {
             login_key,
             control_url,
+            dns_listen,
         } => {
             info!(%control_url, "agent up requested");
-            agent_up(&state_dir, &control_url, &login_key).await?;
+            agent_up(&state_dir, &control_url, &login_key, dns_listen).await?;
         }
         Command::Down => {
             let backend = CustomBackend::with_state_dir(DEFAULT_INTERFACE_NAME, &state_dir);
@@ -103,8 +111,18 @@ struct AgentStatusOutput {
     network_id: Option<String>,
     ipv4: Option<String>,
     dns_records: Vec<DnsRecord>,
+    dns: DnsStatusOutput,
     backend_public_credential_present: bool,
     backend: BackendStatusOutput,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+struct DnsStatusOutput {
+    enabled: bool,
+    listen: String,
+    healthy: bool,
+    records: usize,
+    message: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -118,11 +136,20 @@ struct BackendStatusOutput {
 
 impl AgentStatusOutput {
     fn from_state_and_status(state: AgentState, status: tfscale_net::BackendStatus) -> Self {
+        let dns_records = state.dns_records;
+        let dns_record_count = dns_records.len();
         Self {
             device_id: state.device_id,
             network_id: state.network_id,
             ipv4: state.ipv4,
-            dns_records: state.dns_records,
+            dns_records,
+            dns: DnsStatusOutput {
+                enabled: state.dns_enabled,
+                listen: state.dns_listen,
+                healthy: state.dns_healthy,
+                records: dns_record_count,
+                message: state.dns_message,
+            },
             backend_public_credential_present: !state.backend_public_credential.is_empty(),
             backend: BackendStatusOutput {
                 backend_type: status.backend_type.as_str().to_string(),
@@ -141,10 +168,41 @@ fn init_tracing() {
         .try_init();
 }
 
-async fn agent_up(state_dir: &PathBuf, control_url: &str, login_key: &str) -> Result<AgentState> {
+async fn agent_up(
+    state_dir: &PathBuf,
+    control_url: &str,
+    login_key: &str,
+    dns_listen: SocketAddr,
+) -> Result<AgentState> {
     let client = reqwest::Client::new();
     let mut state = AgentState::load(state_dir)?.unwrap_or_else(AgentState::new);
     let backend = CustomBackend::with_state_dir(DEFAULT_INTERFACE_NAME, state_dir);
+    let dns_runtime = dns::DnsRuntime::new(state.dns_records.clone());
+    let _dns_handle = match dns::spawn_dns_proxy(
+        dns::DnsConfig {
+            listen: dns_listen,
+            suffix: DEFAULT_DNS_SUFFIX.to_string(),
+        },
+        dns_runtime.clone(),
+    )
+    .await
+    {
+        Ok(handle) => {
+            state.dns_enabled = true;
+            state.dns_listen = dns_listen.to_string();
+            state.dns_healthy = true;
+            state.dns_message = Some("DNS proxy listening".to_string());
+            Some(handle)
+        }
+        Err(error) => {
+            state.dns_enabled = true;
+            state.dns_listen = dns_listen.to_string();
+            state.dns_healthy = false;
+            state.dns_message = Some(format!("DNS proxy failed to bind: {error}"));
+            warn!(%error, %dns_listen, "DNS proxy failed to start");
+            None
+        }
+    };
 
     ensure_backend_credentials(&backend, &mut state).await?;
     state.save(state_dir)?;
@@ -162,6 +220,7 @@ async fn agent_up(state_dir: &PathBuf, control_url: &str, login_key: &str) -> Re
     sync_agent_once(
         &client,
         &backend,
+        &dns_runtime,
         state_dir,
         control_url,
         &state,
@@ -171,6 +230,7 @@ async fn agent_up(state_dir: &PathBuf, control_url: &str, login_key: &str) -> Re
     run_agent_loop(
         &client,
         &backend,
+        &dns_runtime,
         state_dir,
         control_url,
         &state,
@@ -235,6 +295,7 @@ async fn ensure_backend_credentials(
 async fn run_agent_loop(
     client: &reqwest::Client,
     backend: &impl NetworkBackend,
+    dns_runtime: &dns::DnsRuntime,
     state_dir: &PathBuf,
     control_url: &str,
     state: &AgentState,
@@ -254,6 +315,7 @@ async fn run_agent_loop(
                 if let Err(error) = sync_agent_once(
                     client,
                     backend,
+                    dns_runtime,
                     state_dir,
                     control_url,
                     state,
@@ -273,6 +335,7 @@ async fn run_agent_loop(
 async fn sync_agent_once(
     client: &reqwest::Client,
     backend: &impl NetworkBackend,
+    dns_runtime: &dns::DnsRuntime,
     state_dir: &PathBuf,
     control_url: &str,
     state: &AgentState,
@@ -282,6 +345,7 @@ async fn sync_agent_once(
     let network_map = fetch_network_map(client, control_url, state).await?;
     apply_network_map_and_maintain_paths(
         backend,
+        dns_runtime,
         state_dir,
         state,
         network_map,
@@ -292,6 +356,7 @@ async fn sync_agent_once(
 
 async fn apply_network_map_and_maintain_paths(
     backend: &impl NetworkBackend,
+    dns_runtime: &dns::DnsRuntime,
     state_dir: &PathBuf,
     state: &AgentState,
     network_map: NetworkMapResponse,
@@ -299,6 +364,7 @@ async fn apply_network_map_and_maintain_paths(
 ) -> Result<()> {
     apply_network_map_if_changed(
         backend,
+        dns_runtime,
         state_dir,
         state,
         network_map,
@@ -472,6 +538,7 @@ fn device_credentials(state: &AgentState) -> Result<(&str, &str)> {
 
 async fn apply_network_map_if_changed(
     backend: &impl NetworkBackend,
+    dns_runtime: &dns::DnsRuntime,
     state_dir: &PathBuf,
     state: &AgentState,
     network_map: NetworkMapResponse,
@@ -483,7 +550,8 @@ async fn apply_network_map_if_changed(
 
     let version = network_map.network_map_version;
     apply_network_map_to_backend(backend, state, &network_map).await?;
-    save_dns_snapshot(state_dir, state, network_map.dns_records).await?;
+    save_dns_snapshot(state_dir, state, network_map.dns_records.clone()).await?;
+    dns_runtime.set_records(network_map.dns_records);
     *last_applied_network_map_version = Some(version);
 
     Ok(())
@@ -644,6 +712,10 @@ fn hostname() -> String {
         .unwrap_or_else(|| "tfscale-node".to_string())
 }
 
+fn default_dns_listen_string() -> String {
+    DEFAULT_DNS_LISTEN.to_string()
+}
+
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 struct AgentState {
     machine_key: String,
@@ -655,6 +727,14 @@ struct AgentState {
     poll_interval_seconds: u64,
     #[serde(default)]
     dns_records: Vec<DnsRecord>,
+    #[serde(default)]
+    dns_enabled: bool,
+    #[serde(default = "default_dns_listen_string")]
+    dns_listen: String,
+    #[serde(default)]
+    dns_healthy: bool,
+    #[serde(default)]
+    dns_message: Option<String>,
 }
 
 impl AgentState {
@@ -662,6 +742,7 @@ impl AgentState {
         Self {
             machine_key: format!("machine_{}", Uuid::now_v7().simple()),
             poll_interval_seconds: 5,
+            dns_listen: DEFAULT_DNS_LISTEN.to_string(),
             ..Self::default()
         }
     }
@@ -815,10 +896,12 @@ mod tests {
             ..AgentState::new()
         };
         let state_dir = temp_state_dir("skip-unchanged-network-map");
+        let dns_runtime = test_dns_runtime();
         let mut last_applied_version = Some(7);
 
         apply_network_map_if_changed(
             &backend,
+            &dns_runtime,
             &state_dir,
             &state,
             network_map_with_version(7),
@@ -842,10 +925,12 @@ mod tests {
             ..AgentState::new()
         };
         let state_dir = temp_state_dir("apply-changed-network-map");
+        let dns_runtime = test_dns_runtime();
         let mut last_applied_version = Some(7);
 
         apply_network_map_if_changed(
             &backend,
+            &dns_runtime,
             &state_dir,
             &state,
             network_map_with_version(8),
@@ -864,6 +949,7 @@ mod tests {
     async fn stores_dns_snapshot_from_network_map() {
         let backend = MockBackend::new("mock-public-key");
         let state_dir = temp_state_dir("dns-snapshot");
+        let dns_runtime = test_dns_runtime();
         let state = AgentState {
             device_id: Some("dev_self".to_string()),
             ipv4: Some("100.64.0.2".to_string()),
@@ -881,6 +967,7 @@ mod tests {
 
         apply_network_map_if_changed(
             &backend,
+            &dns_runtime,
             &state_dir,
             &state,
             network_map,
@@ -895,6 +982,7 @@ mod tests {
         assert_eq!(saved.dns_records.len(), 1);
         assert_eq!(saved.dns_records[0].name, "peer.mesh");
         assert_eq!(saved.dns_records[0].value, "100.64.0.3");
+        assert_eq!(dns_runtime.records_len(), 1);
     }
 
     #[tokio::test]
@@ -906,10 +994,12 @@ mod tests {
             ..AgentState::new()
         };
         let state_dir = temp_state_dir("maintain-after-changed");
+        let dns_runtime = test_dns_runtime();
         let mut last_applied_version = None;
 
         apply_network_map_and_maintain_paths(
             &backend,
+            &dns_runtime,
             &state_dir,
             &state,
             network_map_with_version(8),
@@ -932,10 +1022,12 @@ mod tests {
             ..AgentState::new()
         };
         let state_dir = temp_state_dir("maintain-unchanged");
+        let dns_runtime = test_dns_runtime();
         let mut last_applied_version = Some(8);
 
         apply_network_map_and_maintain_paths(
             &backend,
+            &dns_runtime,
             &state_dir,
             &state,
             network_map_with_version(8),
@@ -1119,6 +1211,10 @@ mod tests {
         ));
         fs::create_dir_all(&path).expect("create temp state dir");
         path
+    }
+
+    fn test_dns_runtime() -> dns::DnsRuntime {
+        dns::DnsRuntime::new(Vec::new())
     }
 
     fn test_endpoint_payload(
