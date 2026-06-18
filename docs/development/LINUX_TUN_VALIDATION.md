@@ -1,47 +1,84 @@
-# Linux TUN Validation
+# Linux TUN 验证指南
 
-Use this checklist on a Linux host after building `tfscale-agent` and
-`tfscaled`. It validates the Linux TUN adapter and, with two Linux hosts, the
-Phase 6 UDP data plane.
+这份文档用于在 Linux 主机上验证 `tfscale-agent` 和 `tfscaled`。单机流程用于确认
+TUN 初始化、UDP 监听、心跳上报和 transport runtime 已启动；双机流程用于验证
+Phase 6 UDP 数据面可以通过 overlay IP 互相 ping 通。
 
-For the scripted flow, prefer:
+优先使用脚本化流程：
 
 ```sh
 scripts/linux-phase6-udp-tun-check.sh single-agent
 ```
 
-That validates local TUN setup, UDP bind, endpoint heartbeat publication, and
-transport runtime startup on one Linux host. Full overlay ping validation needs
-two Linux hosts because the agent currently uses the fixed `tfscale0` interface.
+完整 overlay ping 验证需要两台 Linux 主机，因为当前 agent 固定使用 `tfscale0`
+接口，同一台主机上不能直接启动两个独立 agent 进行完整互 ping。
 
-## Host Requirements
+## 主机要求
 
-- Linux with `/dev/net/tun`.
-- `ip` from `iproute2`.
-- Root or `CAP_NET_ADMIN`.
-- No existing `tfscale0` interface owned by another process.
+- Linux 主机，并且存在 `/dev/net/tun`。
+- 已安装 `iproute2`，可以使用 `ip` 命令。
+- agent 需要 root 或 `CAP_NET_ADMIN` 权限。
+- 测试前不要有其他进程占用 `tfscale0`。
 
-For containers, add:
+如果在容器中测试，需要额外添加：
 
 ```sh
 --cap-add NET_ADMIN --device /dev/net/tun
 ```
 
-## Build
+## 拉取代码并构建
 
 ```sh
+git pull
 cargo build --workspace
 ```
 
-## Scripted Phase 6 Validation
+## 单机冒烟验证
 
-On the control host:
+在一台 Linux 主机上执行：
+
+```sh
+chmod +x scripts/linux-phase6-udp-tun-check.sh
+sudo scripts/linux-phase6-udp-tun-check.sh single-agent
+```
+
+成功时，输出中应包含：
+
+```text
+tun_configured=true
+udp_bound=true
+transport_running=true
+```
+
+同时确认 `tfscale0` 和 overlay 路由存在：
+
+```sh
+ip addr show tfscale0
+ip route show 100.64.0.0/10
+```
+
+单机冒烟验证不要求 ping 通另一台机器，只验证本机 TUN、UDP、endpoint 心跳和
+transport runtime 启动正常。
+
+清理测试资源：
+
+```sh
+sudo scripts/linux-phase6-udp-tun-check.sh cleanup
+```
+
+## 双机真实 Ping 验证
+
+在控制机上启动 control plane：
 
 ```sh
 TFSCALE_CONTROL_LISTEN=0.0.0.0:8080 \
 TFSCALE_CONTROL_URL=http://<control-host-ip>:8080 \
 scripts/linux-phase6-udp-tun-check.sh control
+```
 
+在控制机上生成两个 auth key：
+
+```sh
 TFSCALE_CONTROL_URL=http://<control-host-ip>:8080 \
 scripts/linux-phase6-udp-tun-check.sh make-key
 
@@ -49,24 +86,35 @@ TFSCALE_CONTROL_URL=http://<control-host-ip>:8080 \
 scripts/linux-phase6-udp-tun-check.sh make-key
 ```
 
-On each agent host, use one key:
+在两台 agent 主机上分别执行，每台使用一个不同的 key：
 
 ```sh
 sudo TFSCALE_CONTROL_URL=http://<control-host-ip>:8080 \
   scripts/linux-phase6-udp-tun-check.sh agent --login-key <key>
 ```
 
-Then ping the peer overlay IP:
+在控制机上查看设备和 overlay IP：
+
+```sh
+TFSCALE_CONTROL_URL=http://<control-host-ip>:8080 \
+target/debug/tfscalectl device list
+```
+
+然后在一台 agent 主机上 ping 另一台的 `100.64.0.x`：
 
 ```sh
 ping -c 3 100.64.0.x
 scripts/linux-phase6-udp-tun-check.sh status
 ```
 
-Expected backend status includes `tun_configured=true`, `udp_bound=true`,
-`transport_running=true`, and nonzero `tx_packets` / `rx_packets` after ping.
+验证通过的标准：
 
-## Start Control Plane
+- `ping` 可以收到回复。
+- `status` 中包含 `tun_configured=true`、`udp_bound=true` 和
+  `transport_running=true`。
+- ping 之后 `tx_packets` / `rx_packets` 不是 0。
+
+## 手动启动 Control Plane
 
 ```sh
 rm -f ./tf-scale-dev.db
@@ -79,7 +127,7 @@ In another shell:
 KEY="$(target/debug/tfscalectl auth-key create)"
 ```
 
-## Start Agent With TUN Setup
+## 手动启动 Agent 并配置 TUN
 
 ```sh
 sudo TFSCALE_STATE_DIR=./state \
@@ -88,35 +136,41 @@ sudo TFSCALE_STATE_DIR=./state \
   --control-url http://127.0.0.1:8080
 ```
 
-Expected behavior:
+预期行为：
 
-- Agent registers and remains running.
-- Backend status message includes `tun_configured=true`.
-- `tfscale0` exists.
+- agent 注册成功并持续运行。
+- backend 状态包含 `tun_configured=true`。
+- `tfscale0` 存在。
 
-## Verify Interface and Route
+## 验证接口和路由
 
 ```sh
 ip addr show tfscale0
 ip route show 100.64.0.0/10
 ```
 
-Expected:
+预期结果：
 
-- `tfscale0` has the assigned `100.64.0.x/32` address.
-- `100.64.0.0/10` routes through `tfscale0`.
+- `tfscale0` 拥有分配的 `100.64.0.x/32` 地址。
+- `100.64.0.0/10` 路由指向 `tfscale0`。
 
-## Common Failures
+## 常见失败
 
-- `missing Linux TUN device: /dev/net/tun`: load the `tun` kernel module or pass
-  the TUN device into the container.
-- `required command is missing: ip`: install `iproute2`.
-- `Operation not permitted`: run with root or `CAP_NET_ADMIN`.
-- Route conflict: remove the conflicting route or run on a clean test host.
+- `missing Linux TUN device: /dev/net/tun`：加载 `tun` 内核模块，或把 TUN
+  设备传入容器。
+- `required command is missing: ip`：安装 `iproute2`。
+- `Operation not permitted`：使用 root 运行，或授予 `CAP_NET_ADMIN`。
+- 路由冲突：删除已有冲突路由，或换一台干净测试机。
 
-## Cleanup
+## 清理
 
-Stop the agent with `Ctrl+C`, then remove the interface and route if they remain:
+如果使用脚本启动，执行：
+
+```sh
+sudo scripts/linux-phase6-udp-tun-check.sh cleanup
+```
+
+如果手动启动，先用 `Ctrl+C` 停止 agent；如果接口和路由仍存在，再执行：
 
 ```sh
 sudo ip route del 100.64.0.0/10 dev tfscale0 2>/dev/null || true
