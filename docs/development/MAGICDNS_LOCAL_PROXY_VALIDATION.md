@@ -15,11 +15,42 @@ dig @127.0.0.1 -p 1053 devbox.mesh A
 cargo build -p tfscale-agent -p tfscale-control -p tfscalectl
 ```
 
+或使用脚本自动检查和构建：
+
+```sh
+scripts/magicdns-local-check.sh preflight
+scripts/magicdns-local-check.sh build
+```
+
 准备一台 control 和一台 agent。agent 成功同步 network map 后，`state.json` 中应
 包含 `dns_records`。可以先查看：
 
 ```sh
 target/debug/tfscale-agent --state-dir ./state status --json
+```
+
+## 脚本验证流程
+
+在 Linux 主机上执行：
+
+```sh
+scripts/magicdns-local-check.sh control
+key="$(scripts/magicdns-local-check.sh make-key | tail -n 1)"
+sudo scripts/magicdns-local-check.sh agent --login-key "$key"
+scripts/magicdns-local-check.sh records
+scripts/magicdns-local-check.sh status
+```
+
+找到 records 中的 `name` 和 `value` 后验证：
+
+```sh
+scripts/magicdns-local-check.sh resolve --name <hostname>.mesh --expect <100.64.0.x>
+```
+
+清理：
+
+```sh
+sudo scripts/magicdns-local-check.sh cleanup
 ```
 
 ## 启动 Agent DNS Listener
