@@ -112,6 +112,7 @@ struct BackendStatusOutput {
     interface_name: String,
     healthy: bool,
     message: Option<String>,
+    peers: Vec<tfscale_net::PeerPathDiagnostic>,
 }
 
 impl AgentStatusOutput {
@@ -126,6 +127,7 @@ impl AgentStatusOutput {
                 interface_name: status.interface_name,
                 healthy: status.healthy,
                 message: status.message,
+                peers: status.peers,
             },
         }
     }

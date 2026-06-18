@@ -271,6 +271,10 @@ crates/tfscale-relay/
 
 ## Phase 4：Diagnostics & Validation
 
+状态：backend structured peer path diagnostics、`tfscale-agent status --json`
+peer 列表、`scripts/connectivity-relay-check.sh` 验证入口已实现。CLI relay list
+和更完整的中文验证文档仍待补充。
+
 ### 目标
 
 让用户能明确知道每个 peer 当前走 direct 还是 relay，以及失败原因。
@@ -314,13 +318,15 @@ scripts/connectivity-relay-check.sh
 
 支持：
 
-- `preflight`
-- `control`
-- `relay`
-- `agent`
-- `status`
-- `ping`
-- `cleanup`
+- `preflight`：检查 Linux、TUN、cargo、curl、ip。
+- `build`：构建 workspace。
+- `control`：启动带 relay metadata 的 control plane。
+- `relay`：启动 `tfscale-relay`。
+- `make-key`：创建 auth key。
+- `agent`：启动 agent。
+- `status`：输出 `tfscale-agent status --json`。
+- `ping`：ping peer overlay IP。
+- `cleanup`：清理后台进程和 agent backend。
 
 ### 文档
 

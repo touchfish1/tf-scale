@@ -110,6 +110,27 @@ pub struct BackendStatus {
     pub interface_name: String,
     pub healthy: bool,
     pub message: Option<String>,
+    #[serde(default)]
+    pub peers: Vec<PeerPathDiagnostic>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct PeerPathDiagnostic {
+    pub device_id: String,
+    pub path: PeerPathDiagnosticKind,
+    pub endpoint: Option<String>,
+    pub rtt_ms: Option<u64>,
+    pub failures: u32,
+    pub tx_packets: u64,
+    pub rx_packets: u64,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PeerPathDiagnosticKind {
+    Unknown,
+    Direct,
+    Relay,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -259,6 +280,7 @@ pub mod testing {
                 interface_name: "mock0".to_string(),
                 healthy: true,
                 message: None,
+                peers: Vec::new(),
             })
         }
 

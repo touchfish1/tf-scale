@@ -17,8 +17,8 @@ use std::{
 use tfscale_core::protocol::RelayMessage;
 use tfscale_net::{
     BackendCapabilities, BackendCredential, BackendError, BackendStatus, BackendType, Endpoint,
-    EndpointKind, LocalBackendConfig, NetworkBackend, PeerConfig, PublicEndpointProbe, RelayConfig,
-    Result, TransportProtocol,
+    EndpointKind, LocalBackendConfig, NetworkBackend, PeerConfig, PeerPathDiagnostic,
+    PeerPathDiagnosticKind, PublicEndpointProbe, RelayConfig, Result, TransportProtocol,
 };
 use uuid::Uuid;
 use x25519_dalek::{PublicKey, StaticSecret};
@@ -1046,6 +1046,44 @@ fn direct_path_status(peer_paths: &HashMap<String, PeerPathState>) -> String {
     }
 }
 
+fn peer_path_diagnostics(
+    peers: &[StoredPeerSession],
+    peer_paths: &HashMap<String, PeerPathState>,
+    tx_packets: u64,
+    rx_packets: u64,
+) -> Vec<PeerPathDiagnostic> {
+    peers
+        .iter()
+        .map(|peer| {
+            let state = peer_paths.get(&peer.device_id);
+            PeerPathDiagnostic {
+                device_id: peer.device_id.clone(),
+                path: state
+                    .map(|state| diagnostic_kind(&state.current_path))
+                    .unwrap_or(PeerPathDiagnosticKind::Unknown),
+                endpoint: state.and_then(|state| {
+                    state
+                        .active_endpoint
+                        .as_ref()
+                        .map(|endpoint| format!("{}:{}", endpoint.address, endpoint.port))
+                }),
+                rtt_ms: state.and_then(|state| state.rtt_ms),
+                failures: state.map(|state| state.failures).unwrap_or_default(),
+                tx_packets,
+                rx_packets,
+            }
+        })
+        .collect()
+}
+
+fn diagnostic_kind(value: &PeerPathKind) -> PeerPathDiagnosticKind {
+    match value {
+        PeerPathKind::Unknown => PeerPathDiagnosticKind::Unknown,
+        PeerPathKind::Direct => PeerPathDiagnosticKind::Direct,
+        PeerPathKind::Relay => PeerPathDiagnosticKind::Relay,
+    }
+}
+
 fn relay_endpoint(_relay: &RelayConfig) -> Endpoint {
     Endpoint {
         kind: EndpointKind::Relay,
@@ -1356,6 +1394,12 @@ impl NetworkBackend for CustomBackend {
             .map_err(|error| BackendError::CommandFailed(error.to_string()))?
             .peer_path_state_by_device
             .clone();
+        let peer_diagnostics = peer_path_diagnostics(
+            &runtime.persisted.peers,
+            &peer_path_state_by_device,
+            transport_status.tx_packets,
+            transport_status.rx_packets,
+        );
         let direct_peers = peer_path_state_by_device
             .values()
             .filter(|state| state.current_path == PeerPathKind::Direct)
@@ -1398,6 +1442,7 @@ impl NetworkBackend for CustomBackend {
                 tun_io_ready,
                 tun_message
             )),
+            peers: peer_diagnostics,
         })
     }
 
@@ -2129,6 +2174,10 @@ mod tests {
         assert!(left_message.contains("direct_peers=1"));
         assert!(left_message.contains("direct_paths="));
         assert!(left_message.contains("/rtt="));
+        assert_eq!(left_status.peers.len(), 1);
+        assert_eq!(left_status.peers[0].device_id, right_device_id);
+        assert_eq!(left_status.peers[0].path, PeerPathDiagnosticKind::Direct);
+        assert!(left_status.peers[0].endpoint.is_some());
         assert!(right_status.message.unwrap().contains("direct_peers=1"));
 
         cleanup_state(&left_state_path);
