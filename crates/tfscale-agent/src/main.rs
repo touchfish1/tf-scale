@@ -9,8 +9,9 @@ use std::{
 };
 use tfscale_core::DeviceId;
 use tfscale_core::protocol::{
-    BackendStatusPayload, EndpointPayload, HeartbeatRequest, NetworkMapPeer, NetworkMapResponse,
-    RegisterDeviceRequest, RegisterDeviceResponse,
+    BackendStatusPayload, EndpointPayload, EndpointProbeRequest, EndpointProbeResponse,
+    HeartbeatRequest, NetworkMapPeer, NetworkMapResponse, RegisterDeviceRequest,
+    RegisterDeviceResponse,
 };
 use tfscale_custom::CustomBackend;
 use tfscale_net::{
@@ -287,12 +288,14 @@ async fn send_heartbeat(
 ) -> Result<()> {
     let (device_id, node_key) = device_credentials(state)?;
     let status = backend.status().await?;
-    let endpoints = backend
+    let local_endpoints = backend
         .local_endpoints()
         .await?
         .into_iter()
         .map(endpoint_to_payload)
         .collect::<Vec<_>>();
+    let endpoints =
+        discovered_endpoints(client, control_url, device_id, node_key, local_endpoints).await;
 
     client
         .post(format!("{control_url}/v1/agent/heartbeat"))
@@ -311,6 +314,60 @@ async fn send_heartbeat(
         .error_for_status()?;
 
     Ok(())
+}
+
+async fn discovered_endpoints(
+    client: &reqwest::Client,
+    control_url: &str,
+    device_id: &str,
+    node_key: &str,
+    mut endpoints: Vec<EndpointPayload>,
+) -> Vec<EndpointPayload> {
+    match probe_public_endpoint(client, control_url, device_id, node_key).await {
+        Ok(Some(endpoint)) => endpoints.push(endpoint),
+        Ok(None) => {}
+        Err(error) => warn!(%error, "endpoint probe failed"),
+    }
+
+    endpoints
+}
+
+async fn probe_public_endpoint(
+    client: &reqwest::Client,
+    control_url: &str,
+    device_id: &str,
+    node_key: &str,
+) -> Result<Option<EndpointPayload>> {
+    let response: EndpointProbeResponse = client
+        .post(format!("{control_url}/v1/agent/endpoint-probe"))
+        .json(&EndpointProbeRequest {
+            device_id: device_id.to_string(),
+            node_key: node_key.to_string(),
+            protocol: "udp".to_string(),
+        })
+        .send()
+        .await?
+        .error_for_status()?
+        .json()
+        .await?;
+
+    Ok(endpoint_from_probe_response(response))
+}
+
+fn endpoint_from_probe_response(response: EndpointProbeResponse) -> Option<EndpointPayload> {
+    if response.observed_port == 0 {
+        return None;
+    }
+
+    Some(EndpointPayload {
+        kind: "public".to_string(),
+        address: response.observed_address,
+        port: response.observed_port,
+        protocol: response.protocol,
+        source: Some("stun".to_string()),
+        priority: Some(50),
+        expires_at: None,
+    })
 }
 
 async fn fetch_network_map(
@@ -700,6 +757,34 @@ mod tests {
         assert_eq!(payload.source.as_deref(), Some("local"));
         assert_eq!(payload.priority, Some(100));
         assert_eq!(payload.expires_at, None);
+    }
+
+    #[test]
+    fn converts_probe_response_to_public_endpoint() {
+        let endpoint = endpoint_from_probe_response(EndpointProbeResponse {
+            observed_address: "203.0.113.10".to_string(),
+            observed_port: 49201,
+            protocol: "udp".to_string(),
+        })
+        .expect("public endpoint");
+
+        assert_eq!(endpoint.kind, "public");
+        assert_eq!(endpoint.address, "203.0.113.10");
+        assert_eq!(endpoint.port, 49201);
+        assert_eq!(endpoint.protocol, "udp");
+        assert_eq!(endpoint.source.as_deref(), Some("stun"));
+        assert_eq!(endpoint.priority, Some(50));
+    }
+
+    #[test]
+    fn skips_probe_response_without_port() {
+        let endpoint = endpoint_from_probe_response(EndpointProbeResponse {
+            observed_address: "203.0.113.10".to_string(),
+            observed_port: 0,
+            protocol: "udp".to_string(),
+        });
+
+        assert!(endpoint.is_none());
     }
 
     #[test]

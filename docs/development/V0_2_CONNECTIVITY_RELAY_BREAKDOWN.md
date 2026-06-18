@@ -15,7 +15,8 @@
 ## Phase 1：Endpoint Discovery
 
 状态：协议字段、endpoint metadata migration、heartbeat 存储、peer map 过期过滤、
-HTTP endpoint-probe API 已实现。agent 自动调用 probe 并上报 public endpoint
+HTTP endpoint-probe API、agent 自动调用 probe 并上报 public endpoint 已实现。
+当前 probe 是 control plane 观察到的 HTTP remote endpoint，真实 UDP/STUN probe
 仍待实现。
 
 ### 目标

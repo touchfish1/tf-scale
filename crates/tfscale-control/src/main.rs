@@ -448,12 +448,16 @@ async fn heartbeat(
         .await?;
 
     for endpoint in request.endpoints {
+        let source = endpoint.source.as_deref().unwrap_or("local");
         sqlx::query(
             r#"
             INSERT INTO endpoints (
                 id, device_id, kind, address, port, protocol, source, priority, expires_at
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (
+                ?, ?, ?, ?, ?, ?, ?, ?,
+                COALESCE(?, CASE WHEN ? != 'local' THEN datetime('now', '+60 seconds') END)
+            )
             "#,
         )
         .bind(format!("ep_{}", Uuid::now_v7().simple()))
@@ -462,9 +466,10 @@ async fn heartbeat(
         .bind(&endpoint.address)
         .bind(i64::from(endpoint.port))
         .bind(&endpoint.protocol)
-        .bind(endpoint.source.as_deref().unwrap_or("local"))
+        .bind(source)
         .bind(endpoint.priority.map(i64::from))
         .bind(endpoint.expires_at)
+        .bind(source)
         .execute(&mut *tx)
         .await?;
     }
