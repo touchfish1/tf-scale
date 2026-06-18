@@ -70,6 +70,7 @@ sudo scripts/linux-phase6-udp-tun-check.sh cleanup
 ```
 
 更多 Linux TUN 细节见 [Linux TUN 验证指南](LINUX_TUN_VALIDATION.md)。
+macOS utun 验证见 [macOS TUN/utun 验证指南](MACOS_TUN_VALIDATION.md)。
 
 ## 3. 双机 Overlay Ping
 

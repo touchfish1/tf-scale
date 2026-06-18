@@ -18,7 +18,7 @@ tfscale-net = { path = "../tfscale-net" }
 uuid.workspace = true
 x25519-dalek = { version = "2.0.1", features = ["static_secrets", "getrandom"] }
 
-[target.'cfg(target_os = "linux")'.dependencies]
+[target.'cfg(any(target_os = "linux", target_os = "macos"))'.dependencies]
 tun-rs = "2.8.5"
 
 [dev-dependencies]

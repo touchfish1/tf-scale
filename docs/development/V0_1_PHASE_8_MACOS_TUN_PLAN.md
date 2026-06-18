@@ -17,12 +17,16 @@ overlay IP、安装 overlay 路由，并复用 Phase 6 已完成的 UDP/TUN pack
 - UDP transport、packet crypto、runtime loops 已实现。
 - E2E 验收脚本和 Linux 验证文档已准备好。
 
-仍缺：
+本阶段实现中：
 
 - `platform::macos` 模块。
 - `PlatformTunDevice` 的 macOS variant。
-- macOS 地址、MTU、路由和 cleanup 命令规划。
-- macOS 实机验证脚本和文档。
+- macOS 地址、路由和 cleanup 命令规划。
+- macOS 实机验证文档。
+
+仍缺：
+
+- macOS 实机构建和 privileged utun 验证结果。
 
 ## 设计决策
 
@@ -118,6 +122,7 @@ cargo check -p tfscale-custom --target aarch64-apple-darwin
 ```
 
 如果本机没有 Apple target toolchain，则记录为未执行，交给 macOS 实机验证。
+当前 Windows 开发机下载 Apple targets 时网络中断，因此 Apple target check 未执行。
 
 ## macOS 实机验收
 
@@ -147,6 +152,8 @@ ping -c 3 <linux-overlay-ip>
 - `100.64.0.0/10` 路由指向该 utun。
 - Linux 和 macOS 能通过 overlay IP 互相 ping。
 
+详细步骤见 [macOS TUN/utun 验证指南](MACOS_TUN_VALIDATION.md)。
+
 ## 实施步骤
 
 1. 把 `tun-rs` 依赖扩展到 macOS。
@@ -164,4 +171,3 @@ ping -c 3 <linux-overlay-ip>
 - macOS utun 接口名由系统分配，文档和状态输出必须避免假设固定名称。
 - route 命令可能因已有路由返回失败；后续可实现 replace-like 行为。
 - v0.2 以后可考虑更细的 endpoint ranking 和 platform diagnostics。
-

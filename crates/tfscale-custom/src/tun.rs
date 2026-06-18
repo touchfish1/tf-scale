@@ -88,6 +88,8 @@ impl TunDevice {
 pub(crate) struct PlatformTunDevice {
     #[cfg(target_os = "linux")]
     pub(crate) inner: crate::platform::linux::LinuxTunDevice,
+    #[cfg(target_os = "macos")]
+    pub(crate) inner: crate::platform::macos::MacosTunDevice,
 }
 
 impl PlatformTunDevice {
@@ -97,7 +99,12 @@ impl PlatformTunDevice {
             self.inner.status()
         }
 
-        #[cfg(not(target_os = "linux"))]
+        #[cfg(target_os = "macos")]
+        {
+            self.inner.status()
+        }
+
+        #[cfg(not(any(target_os = "linux", target_os = "macos")))]
         {
             TunStatus::failed("unsupported", unsupported_platform_error().to_string())
         }
@@ -109,7 +116,12 @@ impl PlatformTunDevice {
             self.inner.read_packet(buffer)
         }
 
-        #[cfg(not(target_os = "linux"))]
+        #[cfg(target_os = "macos")]
+        {
+            self.inner.read_packet(buffer)
+        }
+
+        #[cfg(not(any(target_os = "linux", target_os = "macos")))]
         {
             let _ = buffer;
             Err(unsupported_platform_error())
@@ -122,7 +134,12 @@ impl PlatformTunDevice {
             self.inner.try_read_packet(buffer)
         }
 
-        #[cfg(not(target_os = "linux"))]
+        #[cfg(target_os = "macos")]
+        {
+            self.inner.try_read_packet(buffer)
+        }
+
+        #[cfg(not(any(target_os = "linux", target_os = "macos")))]
         {
             let _ = buffer;
             Err(unsupported_platform_error())
@@ -135,7 +152,12 @@ impl PlatformTunDevice {
             self.inner.write_packet(packet)
         }
 
-        #[cfg(not(target_os = "linux"))]
+        #[cfg(target_os = "macos")]
+        {
+            self.inner.write_packet(packet)
+        }
+
+        #[cfg(not(any(target_os = "linux", target_os = "macos")))]
         {
             let _ = packet;
             Err(unsupported_platform_error())
@@ -148,14 +170,19 @@ impl PlatformTunDevice {
             self.inner.shutdown()
         }
 
-        #[cfg(not(target_os = "linux"))]
+        #[cfg(target_os = "macos")]
+        {
+            self.inner.shutdown()
+        }
+
+        #[cfg(not(any(target_os = "linux", target_os = "macos")))]
         {
             Err(unsupported_platform_error())
         }
     }
 }
 
-#[cfg_attr(target_os = "linux", allow(dead_code))]
+#[cfg_attr(any(target_os = "linux", target_os = "macos"), allow(dead_code))]
 pub(crate) fn unsupported_platform_error() -> BackendError {
     BackendError::UnsupportedPlatform(format!(
         "TUN setup is not supported on {}",
