@@ -112,6 +112,10 @@ POST /v1/agent/endpoint-probe
 
 ## Phase 2：UDP Hole Punching
 
+状态：加密 `probe` / `probe_response` frame、endpoint ranking、backend direct path
+state、收到 probe 自动回 probe_response、收到 probe_response 后记录 active direct
+endpoint 已实现。后台周期性 probe 调度、失败降级和 RTT 统计仍待实现。
+
 ### 目标
 
 对 peer endpoint candidates 进行并发探测，NAT 允许时自动建立 direct path。
@@ -148,13 +152,16 @@ struct PeerPathState {
 
 probe/probe_response 仍使用现有 crypto session 加密认证。
 
+当前实现中 probe payload 为轻量控制消息，认证依赖现有 XChaCha20-Poly1305
+session、frame source/destination 和 nonce replay window。
+
 ### Transport 改动
 
-- 对每个 peer endpoint 启动 probe。
-- 收到有效 probe 后回复 probe_response。
-- 收到 probe_response 后记录 active direct endpoint。
-- data packet 优先走 active direct endpoint。
-- direct endpoint 连续失败后降级为 unknown，等待 relay 或重试。
+- 对每个 peer endpoint 启动 probe：已实现 backend 原语，后台调度待接入。
+- 收到有效 probe 后回复 probe_response：已实现。
+- 收到 probe_response 后记录 active direct endpoint：已实现。
+- data packet 优先走 active direct endpoint：已实现为更新 peer session endpoint。
+- direct endpoint 连续失败后降级为 unknown，等待 relay 或重试：待实现。
 
 ### Endpoint Ranking
 
@@ -173,10 +180,10 @@ probe/probe_response 仍使用现有 crypto session 加密认证。
 
 ### 测试
 
-- probe frame round-trip。
+- probe frame round-trip：已覆盖。
 - invalid probe 被拒绝。
-- endpoint ranking。
-- direct success 更新 peer path。
+- endpoint ranking：已覆盖。
+- direct success 更新 peer path：已覆盖。
 - direct failure 触发降级。
 
 ### 验收

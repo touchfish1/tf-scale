@@ -5,6 +5,8 @@ use uuid::Uuid;
 
 pub(crate) const FRAME_VERSION: u8 = 1;
 pub(crate) const FRAME_TYPE_DATA: u8 = 1;
+pub(crate) const FRAME_TYPE_PROBE: u8 = 2;
+pub(crate) const FRAME_TYPE_PROBE_RESPONSE: u8 = 3;
 pub(crate) const HEADER_LEN: usize = 60;
 pub(crate) const DEVICE_ID_LEN: usize = 16;
 pub(crate) const NONCE_LEN: usize = 24;
@@ -46,15 +48,24 @@ pub(crate) struct FrameHeader {
 }
 
 impl FrameHeader {
-    pub fn data(source: FrameDeviceId, destination: FrameDeviceId, nonce: [u8; NONCE_LEN]) -> Self {
+    pub fn new(
+        source: FrameDeviceId,
+        destination: FrameDeviceId,
+        nonce: [u8; NONCE_LEN],
+        message_type: u8,
+    ) -> Self {
         Self {
             version: FRAME_VERSION,
-            message_type: FRAME_TYPE_DATA,
+            message_type,
             flags: 0,
             source,
             destination,
             nonce,
         }
+    }
+
+    pub fn data(source: FrameDeviceId, destination: FrameDeviceId, nonce: [u8; NONCE_LEN]) -> Self {
+        Self::new(source, destination, nonce, FRAME_TYPE_DATA)
     }
 
     pub fn encode(&self) -> Result<[u8; HEADER_LEN]> {
@@ -64,7 +75,10 @@ impl FrameHeader {
                 self.version
             )));
         }
-        if self.message_type != FRAME_TYPE_DATA {
+        if !matches!(
+            self.message_type,
+            FRAME_TYPE_DATA | FRAME_TYPE_PROBE | FRAME_TYPE_PROBE_RESPONSE
+        ) {
             return Err(BackendError::CommandFailed(format!(
                 "unsupported frame message type: {}",
                 self.message_type
@@ -101,7 +115,10 @@ impl FrameHeader {
                 input[0]
             )));
         }
-        if input[1] != FRAME_TYPE_DATA {
+        if !matches!(
+            input[1],
+            FRAME_TYPE_DATA | FRAME_TYPE_PROBE | FRAME_TYPE_PROBE_RESPONSE
+        ) {
             return Err(BackendError::CommandFailed(format!(
                 "unsupported frame message type: {}",
                 input[1]
@@ -170,6 +187,18 @@ mod tests {
         let source = FrameDeviceId::new([1; DEVICE_ID_LEN]);
         let destination = FrameDeviceId::new([2; DEVICE_ID_LEN]);
         let header = FrameHeader::data(source, destination, [3; NONCE_LEN]);
+
+        let encoded = header.encode().expect("encoded header");
+        let decoded = FrameHeader::decode(&encoded).expect("decoded header");
+
+        assert_eq!(decoded, header);
+    }
+
+    #[test]
+    fn probe_frame_header_round_trips() {
+        let source = FrameDeviceId::new([1; DEVICE_ID_LEN]);
+        let destination = FrameDeviceId::new([2; DEVICE_ID_LEN]);
+        let header = FrameHeader::new(source, destination, [3; NONCE_LEN], FRAME_TYPE_PROBE);
 
         let encoded = header.encode().expect("encoded header");
         let decoded = FrameHeader::decode(&encoded).expect("decoded header");

@@ -15,7 +15,8 @@ use std::{
 };
 use tfscale_net::{
     BackendCapabilities, BackendCredential, BackendError, BackendStatus, BackendType, Endpoint,
-    LocalBackendConfig, NetworkBackend, PeerConfig, PublicEndpointProbe, Result,
+    EndpointKind, LocalBackendConfig, NetworkBackend, PeerConfig, PublicEndpointProbe, Result,
+    TransportProtocol,
 };
 use uuid::Uuid;
 use x25519_dalek::{PublicKey, StaticSecret};
@@ -29,9 +30,11 @@ mod transport;
 mod tun;
 
 use crypto::{PeerCryptoSession, decode_public_credential};
-use frame::{EncodedFrame, FrameDeviceId};
+use frame::{
+    EncodedFrame, FRAME_TYPE_DATA, FRAME_TYPE_PROBE, FRAME_TYPE_PROBE_RESPONSE, FrameDeviceId,
+};
 use packet::ipv4_destination;
-use transport::{TransportRuntime, select_udp_endpoint};
+use transport::{TransportRuntime, select_udp_endpoint, sorted_udp_endpoints};
 use tun::{TunConfig, TunDevice, TunStatus};
 
 const STATE_VERSION: u32 = 1;
@@ -208,6 +211,14 @@ impl CustomBackend {
             .receive_overlay_packet(buffer)
     }
 
+    #[allow(dead_code)]
+    fn probe_peer_direct_paths(&self) -> Result<usize> {
+        self.state
+            .lock()
+            .map_err(|error| BackendError::CommandFailed(error.to_string()))?
+            .probe_peer_direct_paths()
+    }
+
     fn probe_public_endpoint_blocking(
         &self,
         probe_server: SocketAddr,
@@ -287,6 +298,7 @@ struct RuntimeState {
     peer_udp_endpoints_by_device: HashMap<String, Endpoint>,
     peer_device_by_frame_id: HashMap<FrameDeviceId, String>,
     peer_transport_sessions_by_device: HashMap<String, PeerTransportSession>,
+    peer_path_state_by_device: HashMap<String, PeerPathState>,
     tun_status: Option<TunStatus>,
     tun_device: Option<TunDevice>,
     transport: Option<TransportRuntime>,
@@ -306,6 +318,38 @@ struct PeerTransportSession {
     endpoint: Endpoint,
     #[allow(dead_code)]
     crypto: PeerCryptoSession,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+enum PeerPathKind {
+    Unknown,
+    Direct,
+    #[allow(dead_code)]
+    Relay,
+}
+
+#[derive(Clone, Debug)]
+struct PeerPathState {
+    current_path: PeerPathKind,
+    active_endpoint: Option<Endpoint>,
+    last_probe_at: Option<SystemTime>,
+    last_success_at: Option<SystemTime>,
+    failures: u32,
+    #[allow(dead_code)]
+    rtt_ms: Option<u64>,
+}
+
+impl Default for PeerPathState {
+    fn default() -> Self {
+        Self {
+            current_path: PeerPathKind::Unknown,
+            active_endpoint: None,
+            last_probe_at: None,
+            last_success_at: None,
+            failures: 0,
+            rtt_ms: None,
+        }
+    }
 }
 
 impl RuntimeState {
@@ -348,6 +392,11 @@ impl RuntimeState {
             .collect();
         let peer_transport_sessions_by_device =
             build_peer_transport_sessions(&persisted).unwrap_or_default();
+        let peer_path_state_by_device = persisted
+            .peers
+            .iter()
+            .map(|peer| (peer.device_id.clone(), PeerPathState::default()))
+            .collect();
 
         Self {
             persisted,
@@ -357,6 +406,7 @@ impl RuntimeState {
             peer_udp_endpoints_by_device,
             peer_device_by_frame_id,
             peer_transport_sessions_by_device,
+            peer_path_state_by_device,
             tun_status: None,
             tun_device: None,
             transport: None,
@@ -391,8 +441,36 @@ impl RuntimeState {
         transport.send_packet(&session.endpoint, &mut session.crypto, packet)
     }
 
+    fn probe_peer_direct_paths(&mut self) -> Result<usize> {
+        let mut sent = 0;
+        let transport = self
+            .transport
+            .as_mut()
+            .ok_or_else(|| BackendError::CommandFailed("UDP transport is not bound".to_string()))?;
+
+        for peer in &self.persisted.peers {
+            let Some(session) = self
+                .peer_transport_sessions_by_device
+                .get_mut(&peer.device_id)
+            else {
+                continue;
+            };
+            for endpoint in sorted_udp_endpoints(&peer.endpoints) {
+                let frame = session.crypto.seal_message(b"probe", FRAME_TYPE_PROBE)?;
+                transport.send_frame(&endpoint, &frame)?;
+                sent += 1;
+            }
+            self.peer_path_state_by_device
+                .entry(peer.device_id.clone())
+                .or_default()
+                .last_probe_at = Some(SystemTime::now());
+        }
+
+        Ok(sent)
+    }
+
     fn receive_overlay_packet(&mut self, buffer: &mut [u8]) -> Result<Option<Vec<u8>>> {
-        let Some((received, _)) = self
+        let Some((received, source_addr)) = self
             .transport
             .as_mut()
             .ok_or_else(|| BackendError::CommandFailed("UDP transport is not bound".to_string()))?
@@ -431,14 +509,65 @@ impl RuntimeState {
                     "peer transport session is not ready: {device_id}"
                 ))
             })?;
-        match session.crypto.open(&buffer[..received]) {
-            Ok(packet) => Ok(Some(packet)),
+        let opened = match session.crypto.open_message(&buffer[..received]) {
+            Ok(opened) => opened,
             Err(error) => {
                 if let Some(transport) = self.transport.as_mut() {
                     transport.record_rx_drop();
                 }
-                Err(error)
+                return Err(error);
             }
+        };
+
+        match opened.message_type {
+            FRAME_TYPE_DATA => Ok(Some(opened.plaintext)),
+            FRAME_TYPE_PROBE => {
+                let response = session
+                    .crypto
+                    .seal_message(b"probe_response", FRAME_TYPE_PROBE_RESPONSE)?;
+                let endpoint = Endpoint {
+                    kind: EndpointKind::Public,
+                    address: source_addr.ip(),
+                    port: source_addr.port(),
+                    protocol: TransportProtocol::Udp,
+                };
+                self.transport
+                    .as_mut()
+                    .ok_or_else(|| {
+                        BackendError::CommandFailed("UDP transport is not bound".to_string())
+                    })?
+                    .send_frame(&endpoint, &response)?;
+                self.mark_peer_direct(&device_id, endpoint);
+                Ok(None)
+            }
+            FRAME_TYPE_PROBE_RESPONSE => {
+                let endpoint = Endpoint {
+                    kind: EndpointKind::Public,
+                    address: source_addr.ip(),
+                    port: source_addr.port(),
+                    protocol: TransportProtocol::Udp,
+                };
+                self.mark_peer_direct(&device_id, endpoint);
+                Ok(None)
+            }
+            other => Err(BackendError::CommandFailed(format!(
+                "unsupported opened frame message type: {other}"
+            ))),
+        }
+    }
+
+    fn mark_peer_direct(&mut self, device_id: &str, endpoint: Endpoint) {
+        let state = self
+            .peer_path_state_by_device
+            .entry(device_id.to_string())
+            .or_default();
+        state.current_path = PeerPathKind::Direct;
+        state.active_endpoint = Some(endpoint.clone());
+        state.last_success_at = Some(SystemTime::now());
+        state.failures = 0;
+
+        if let Some(session) = self.peer_transport_sessions_by_device.get_mut(device_id) {
+            session.endpoint = endpoint;
         }
     }
 
@@ -849,7 +978,15 @@ impl NetworkBackend for CustomBackend {
             .is_some();
         let transport_peers = runtime.peer_udp_endpoints_by_device.len();
         let transport_sessions = runtime.peer_transport_sessions_by_device.len();
-        let reachable_peers = transport_peers;
+        let direct_peers = self
+            .state
+            .lock()
+            .map_err(|error| BackendError::CommandFailed(error.to_string()))?
+            .peer_path_state_by_device
+            .values()
+            .filter(|state| state.current_path == PeerPathKind::Direct)
+            .count();
+        let reachable_peers = direct_peers;
         Ok(BackendStatus {
             backend_type: self.backend_type(),
             interface_name: self.interface_name.clone(),
@@ -858,7 +995,7 @@ impl NetworkBackend for CustomBackend {
                 && transport_status.udp_bound
                 && transport_running,
             message: Some(format!(
-                "custom backend state: credentials={} local_config={} peers={} peer_indexes=device:{} overlay:{} crypto_peers={} udp_bound={} transport_running={} local_endpoints={} transport_peers={} transport_sessions={} reachable_peers={} tx_packets={} rx_packets={} tx_drops={} rx_drops={} tun_configured={} tun_io_ready={} tun_message={} data_plane=transport_ready",
+                "custom backend state: credentials={} local_config={} peers={} peer_indexes=device:{} overlay:{} crypto_peers={} udp_bound={} transport_running={} local_endpoints={} transport_peers={} transport_sessions={} direct_peers={} reachable_peers={} tx_packets={} rx_packets={} tx_drops={} rx_drops={} tun_configured={} tun_io_ready={} tun_message={} data_plane=transport_ready",
                 has_credentials,
                 has_local_config,
                 runtime.persisted.peers.len(),
@@ -870,6 +1007,7 @@ impl NetworkBackend for CustomBackend {
                 transport_status.local_endpoints,
                 transport_peers,
                 transport_sessions,
+                direct_peers,
                 reachable_peers,
                 transport_status.tx_packets,
                 transport_status.rx_packets,
@@ -1338,6 +1476,80 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn direct_probe_round_trip_marks_peer_paths_direct() {
+        let left_state_path = temp_state_path("direct-probe-left");
+        let right_state_path = temp_state_path("direct-probe-right");
+        let left = test_backend(&left_state_path);
+        let right = test_backend(&right_state_path);
+        let left_device_id = DeviceId::new().to_string();
+        let right_device_id = DeviceId::new().to_string();
+        let left_credential = left.ensure_credentials().await.expect("left credentials");
+        let right_credential = right.ensure_credentials().await.expect("right credentials");
+
+        left.apply_local_config(LocalBackendConfig {
+            device_id: left_device_id.clone(),
+            interface_name: "tfscale0".to_string(),
+            overlay_ip: Ipv4Addr::new(100, 64, 0, 2),
+            listen_port: 0,
+        })
+        .await
+        .expect("left local config");
+        right
+            .apply_local_config(LocalBackendConfig {
+                device_id: right_device_id.clone(),
+                interface_name: "tfscale0".to_string(),
+                overlay_ip: Ipv4Addr::new(100, 64, 0, 3),
+                listen_port: 0,
+            })
+            .await
+            .expect("right local config");
+
+        let left_endpoint = left
+            .local_endpoints()
+            .await
+            .expect("left endpoint")
+            .into_iter()
+            .next()
+            .expect("left endpoint");
+        let right_endpoint = right
+            .local_endpoints()
+            .await
+            .expect("right endpoint")
+            .into_iter()
+            .next()
+            .expect("right endpoint");
+
+        left.apply_peer_map(vec![PeerConfig {
+            public_credential: right_credential,
+            endpoints: vec![right_endpoint],
+            ..test_peer(&right_device_id, Ipv4Addr::new(100, 64, 0, 3))
+        }])
+        .await
+        .expect("left peer map");
+        right
+            .apply_peer_map(vec![PeerConfig {
+                public_credential: left_credential,
+                endpoints: vec![left_endpoint],
+                ..test_peer(&left_device_id, Ipv4Addr::new(100, 64, 0, 2))
+            }])
+            .await
+            .expect("right peer map");
+
+        assert_eq!(left.probe_peer_direct_paths().expect("send probe"), 1);
+        let mut buffer = [0u8; 1500];
+        receive_backend_control_frame_with_retry(&right, &mut buffer).expect("right probe");
+        receive_backend_control_frame_with_retry(&left, &mut buffer).expect("left response");
+
+        let left_status = left.status().await.expect("left status");
+        let right_status = right.status().await.expect("right status");
+        assert!(left_status.message.unwrap().contains("direct_peers=1"));
+        assert!(right_status.message.unwrap().contains("direct_peers=1"));
+
+        cleanup_state(&left_state_path);
+        cleanup_state(&right_state_path);
+    }
+
+    #[tokio::test]
     async fn shutdown_without_tun_device_succeeds() {
         let state_path = temp_state_path("shutdown-no-tun");
         let backend = test_backend(&state_path);
@@ -1423,6 +1635,21 @@ mod tests {
                 .expect("receive overlay packet")
             {
                 return Some(packet);
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        None
+    }
+
+    fn receive_backend_control_frame_with_retry(
+        backend: &CustomBackend,
+        buffer: &mut [u8],
+    ) -> Option<()> {
+        for _ in 0..10 {
+            match backend.receive_overlay_packet(buffer) {
+                Ok(Some(_packet)) => return None,
+                Ok(None) => return Some(()),
+                Err(_) => {}
             }
             std::thread::sleep(std::time::Duration::from_millis(10));
         }

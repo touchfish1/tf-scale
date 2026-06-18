@@ -191,10 +191,28 @@ pub(crate) struct TransportStatus {
 pub(crate) fn select_udp_endpoint(endpoints: &[Endpoint]) -> Option<Endpoint> {
     endpoints
         .iter()
-        .find(|endpoint| {
-            endpoint.kind == EndpointKind::Lan && endpoint.protocol == TransportProtocol::Udp
-        })
+        .filter(|endpoint| endpoint.protocol == TransportProtocol::Udp)
+        .min_by_key(|endpoint| endpoint_rank(endpoint))
         .cloned()
+}
+
+pub(crate) fn sorted_udp_endpoints(endpoints: &[Endpoint]) -> Vec<Endpoint> {
+    let mut endpoints = endpoints
+        .iter()
+        .filter(|endpoint| endpoint.protocol == TransportProtocol::Udp)
+        .cloned()
+        .collect::<Vec<_>>();
+    endpoints.sort_by_key(endpoint_rank);
+    endpoints
+}
+
+fn endpoint_rank(endpoint: &Endpoint) -> u8 {
+    match endpoint.kind {
+        EndpointKind::Lan => 0,
+        EndpointKind::Ipv6 => 1,
+        EndpointKind::Public => 2,
+        EndpointKind::Relay => 3,
+    }
 }
 
 fn endpoint_socket_addr(endpoint: &Endpoint) -> Result<SocketAddr> {
@@ -283,6 +301,34 @@ mod tests {
 
         assert_eq!(endpoint.kind, EndpointKind::Lan);
         assert_eq!(endpoint.protocol, TransportProtocol::Udp);
+    }
+
+    #[test]
+    fn ranks_udp_endpoints_by_direct_preference() {
+        let endpoints = sorted_udp_endpoints(&[
+            Endpoint {
+                kind: EndpointKind::Relay,
+                address: IpAddr::V4(Ipv4Addr::new(203, 0, 113, 20)),
+                port: 443,
+                protocol: TransportProtocol::Udp,
+            },
+            Endpoint {
+                kind: EndpointKind::Public,
+                address: IpAddr::V4(Ipv4Addr::new(203, 0, 113, 10)),
+                port: 51820,
+                protocol: TransportProtocol::Udp,
+            },
+            Endpoint {
+                kind: EndpointKind::Lan,
+                address: IpAddr::V4(Ipv4Addr::new(192, 168, 1, 30)),
+                port: 51820,
+                protocol: TransportProtocol::Udp,
+            },
+        ]);
+
+        assert_eq!(endpoints[0].kind, EndpointKind::Lan);
+        assert_eq!(endpoints[1].kind, EndpointKind::Public);
+        assert_eq!(endpoints[2].kind, EndpointKind::Relay);
     }
 
     #[test]

@@ -58,15 +58,19 @@ impl PeerCryptoSession {
     }
 
     pub fn seal(&mut self, plaintext_packet: &[u8]) -> Result<Vec<u8>> {
+        self.seal_message(plaintext_packet, crate::frame::FRAME_TYPE_DATA)
+    }
+
+    pub fn seal_message(&mut self, plaintext: &[u8], message_type: u8) -> Result<Vec<u8>> {
         let nonce = self.send_nonces.next()?;
-        let header = FrameHeader::data(self.local_id, self.peer_id, nonce);
+        let header = FrameHeader::new(self.local_id, self.peer_id, nonce, message_type);
         let associated_data = header.encode()?;
         let ciphertext = self
             .cipher
             .encrypt(
                 XNonce::from_slice(&nonce),
                 Payload {
-                    msg: plaintext_packet,
+                    msg: plaintext,
                     aad: &associated_data,
                 },
             )
@@ -76,6 +80,10 @@ impl PeerCryptoSession {
     }
 
     pub fn open(&mut self, frame: &[u8]) -> Result<Vec<u8>> {
+        Ok(self.open_message(frame)?.plaintext)
+    }
+
+    pub fn open_message(&mut self, frame: &[u8]) -> Result<OpenFrame> {
         let encoded = EncodedFrame::decode(frame)?;
         if encoded.header.source != self.peer_id {
             return Err(BackendError::CommandFailed(
@@ -105,8 +113,17 @@ impl PeerCryptoSession {
             )
             .map_err(|_| BackendError::CommandFailed("packet authentication failed".to_string()))?;
         self.receive_window.accept(&encoded.header.nonce)?;
-        Ok(plaintext)
+        Ok(OpenFrame {
+            message_type: encoded.header.message_type,
+            plaintext,
+        })
     }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct OpenFrame {
+    pub message_type: u8,
+    pub plaintext: Vec<u8>,
 }
 
 pub(crate) fn decode_public_credential(value: &str) -> Result<[u8; 32]> {
@@ -241,6 +258,19 @@ mod tests {
         let opened = right.open(&frame).expect("opened frame");
 
         assert_eq!(opened, packet);
+    }
+
+    #[test]
+    fn seals_and_opens_probe_frame() {
+        let (mut left, mut right) = session_pair();
+
+        let frame = left
+            .seal_message(b"probe", crate::frame::FRAME_TYPE_PROBE)
+            .expect("sealed frame");
+        let opened = right.open_message(&frame).expect("opened frame");
+
+        assert_eq!(opened.message_type, crate::frame::FRAME_TYPE_PROBE);
+        assert_eq!(opened.plaintext, b"probe");
     }
 
     #[test]
