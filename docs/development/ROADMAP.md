@@ -48,6 +48,18 @@ Development breakdown:
 - Relay health reporting.
 - Direct-to-relay fallback behavior.
 
+## Near Term: Tailscale-like Day-One Experience
+
+Before the web console, prioritize the command-line and agent work needed for a
+Tailscale-like day-one experience. Detailed plan:
+[Tailscale-like Experience Plan](TAILSCALE_LIKE_EXPERIENCE_PLAN.md).
+
+- System resolver integration for `ping hostname.mesh`.
+- Agent service installation and restart persistence.
+- Unified agent/control diagnostics.
+- TLS and relay authentication hardening.
+- Install scripts and release binaries.
+
 ## v0.5: Admin Console
 
 - React plus Vite web application.
