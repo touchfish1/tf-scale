@@ -25,6 +25,9 @@ control plane 能生成 `hostname.mesh` 记录，CLI 能查看 DNS records，后
 
 ## Phase 1：Control DNS Records
 
+状态：已完成。control plane 已新增 `dns_records` migration、`GET /v1/dns/records`、
+register/rename/delete 记录维护，CLI 已支持 `tfscalectl dns records`。
+
 数据模型新增 `dns_records`：
 
 ```text
@@ -65,6 +68,10 @@ tfscalectl --json dns records
 ```
 
 ## Phase 2：Agent DNS Snapshot
+
+状态：已完成。network map 已携带 `dns_records`，agent 会在同步到新
+`network_map_version` 时保存 DNS snapshot 到本地 `state.json`，并在
+`tfscale-agent status --json` 中展示。此阶段不修改系统 DNS。
 
 agent 从 control 拉取 DNS records 或从 network map 中接收 DNS snapshot，并保存到
 本地 runtime。此阶段只同步数据，不修改系统 DNS。

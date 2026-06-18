@@ -737,6 +737,7 @@ async fn network_map(
             backend_type: self_row.get("backend_type"),
         },
         peers,
+        dns_records: load_dns_records(&state.pool).await?,
         relays: state.relays,
     }))
 }
@@ -867,6 +868,28 @@ async fn load_endpoints(
         .collect())
 }
 
+async fn load_dns_records(pool: &SqlitePool) -> std::result::Result<Vec<DnsRecord>, ApiError> {
+    let rows = sqlx::query(
+        r#"
+        SELECT device_id, name, type, value
+        FROM dns_records
+        ORDER BY name ASC, type ASC
+        "#,
+    )
+    .fetch_all(pool)
+    .await?;
+
+    Ok(rows
+        .into_iter()
+        .map(|row| DnsRecord {
+            device_id: row.get("device_id"),
+            name: row.get("name"),
+            record_type: row.get("type"),
+            value: row.get("value"),
+        })
+        .collect())
+}
+
 async fn network_map_version(pool: &SqlitePool) -> std::result::Result<i64, ApiError> {
     let device_count: i64 =
         sqlx::query_scalar("SELECT COUNT(*) FROM devices WHERE deleted_at IS NULL")
@@ -884,8 +907,20 @@ async fn network_map_version(pool: &SqlitePool) -> std::result::Result<i64, ApiE
         sqlx::query_scalar("SELECT COALESCE(SUM(unixepoch(last_seen_at)), 0) FROM endpoints")
             .fetch_one(pool)
             .await?;
+    let dns_record_count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM dns_records")
+        .fetch_one(pool)
+        .await?;
+    let dns_record_timestamp_sum: i64 =
+        sqlx::query_scalar("SELECT COALESCE(SUM(unixepoch(updated_at)), 0) FROM dns_records")
+            .fetch_one(pool)
+            .await?;
 
-    Ok(device_count + device_timestamp_sum + endpoint_count + endpoint_timestamp_sum)
+    Ok(device_count
+        + device_timestamp_sum
+        + endpoint_count
+        + endpoint_timestamp_sum
+        + dns_record_count
+        + dns_record_timestamp_sum)
 }
 
 async fn allocate_ipv4(pool: &SqlitePool) -> std::result::Result<String, ApiError> {

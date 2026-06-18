@@ -111,6 +111,8 @@ pub struct NetworkMapResponse {
     pub self_device: NetworkMapSelf,
     pub peers: Vec<NetworkMapPeer>,
     #[serde(default)]
+    pub dns_records: Vec<DnsRecord>,
+    #[serde(default)]
     pub relays: Vec<RelayMetadata>,
 }
 

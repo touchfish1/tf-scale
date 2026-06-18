@@ -9,7 +9,7 @@ use std::{
 };
 use tfscale_core::DeviceId;
 use tfscale_core::protocol::{
-    BackendStatusPayload, EndpointPayload, EndpointProbeRequest, EndpointProbeResponse,
+    BackendStatusPayload, DnsRecord, EndpointPayload, EndpointProbeRequest, EndpointProbeResponse,
     HeartbeatRequest, NetworkMapPeer, NetworkMapResponse, RegisterDeviceRequest,
     RegisterDeviceResponse,
 };
@@ -102,6 +102,7 @@ struct AgentStatusOutput {
     device_id: Option<String>,
     network_id: Option<String>,
     ipv4: Option<String>,
+    dns_records: Vec<DnsRecord>,
     backend_public_credential_present: bool,
     backend: BackendStatusOutput,
 }
@@ -121,6 +122,7 @@ impl AgentStatusOutput {
             device_id: state.device_id,
             network_id: state.network_id,
             ipv4: state.ipv4,
+            dns_records: state.dns_records,
             backend_public_credential_present: !state.backend_public_credential.is_empty(),
             backend: BackendStatusOutput {
                 backend_type: status.backend_type.as_str().to_string(),
@@ -160,6 +162,7 @@ async fn agent_up(state_dir: &PathBuf, control_url: &str, login_key: &str) -> Re
     sync_agent_once(
         &client,
         &backend,
+        state_dir,
         control_url,
         &state,
         &mut last_applied_network_map_version,
@@ -168,6 +171,7 @@ async fn agent_up(state_dir: &PathBuf, control_url: &str, login_key: &str) -> Re
     run_agent_loop(
         &client,
         &backend,
+        state_dir,
         control_url,
         &state,
         &mut last_applied_network_map_version,
@@ -231,6 +235,7 @@ async fn ensure_backend_credentials(
 async fn run_agent_loop(
     client: &reqwest::Client,
     backend: &impl NetworkBackend,
+    state_dir: &PathBuf,
     control_url: &str,
     state: &AgentState,
     last_applied_network_map_version: &mut Option<i64>,
@@ -249,6 +254,7 @@ async fn run_agent_loop(
                 if let Err(error) = sync_agent_once(
                     client,
                     backend,
+                    state_dir,
                     control_url,
                     state,
                     last_applied_network_map_version,
@@ -267,6 +273,7 @@ async fn run_agent_loop(
 async fn sync_agent_once(
     client: &reqwest::Client,
     backend: &impl NetworkBackend,
+    state_dir: &PathBuf,
     control_url: &str,
     state: &AgentState,
     last_applied_network_map_version: &mut Option<i64>,
@@ -275,6 +282,7 @@ async fn sync_agent_once(
     let network_map = fetch_network_map(client, control_url, state).await?;
     apply_network_map_and_maintain_paths(
         backend,
+        state_dir,
         state,
         network_map,
         last_applied_network_map_version,
@@ -284,12 +292,14 @@ async fn sync_agent_once(
 
 async fn apply_network_map_and_maintain_paths(
     backend: &impl NetworkBackend,
+    state_dir: &PathBuf,
     state: &AgentState,
     network_map: NetworkMapResponse,
     last_applied_network_map_version: &mut Option<i64>,
 ) -> Result<()> {
     apply_network_map_if_changed(
         backend,
+        state_dir,
         state,
         network_map,
         last_applied_network_map_version,
@@ -462,6 +472,7 @@ fn device_credentials(state: &AgentState) -> Result<(&str, &str)> {
 
 async fn apply_network_map_if_changed(
     backend: &impl NetworkBackend,
+    state_dir: &PathBuf,
     state: &AgentState,
     network_map: NetworkMapResponse,
     last_applied_network_map_version: &mut Option<i64>,
@@ -471,7 +482,8 @@ async fn apply_network_map_if_changed(
     }
 
     let version = network_map.network_map_version;
-    apply_network_map_to_backend(backend, state, network_map).await?;
+    apply_network_map_to_backend(backend, state, &network_map).await?;
+    save_dns_snapshot(state_dir, state, network_map.dns_records).await?;
     *last_applied_network_map_version = Some(version);
 
     Ok(())
@@ -480,7 +492,7 @@ async fn apply_network_map_if_changed(
 async fn apply_network_map_to_backend(
     backend: &impl NetworkBackend,
     state: &AgentState,
-    network_map: NetworkMapResponse,
+    network_map: &NetworkMapResponse,
 ) -> Result<()> {
     let overlay_ip = state
         .ipv4
@@ -502,13 +514,23 @@ async fn apply_network_map_to_backend(
         })
         .await?;
     backend
-        .apply_relay_map(network_map_to_relay_configs(network_map.relays))
+        .apply_relay_map(network_map_to_relay_configs(network_map.relays.clone()))
         .await?;
     backend
-        .apply_peer_map(network_map_to_peer_configs(network_map.peers)?)
+        .apply_peer_map(network_map_to_peer_configs(network_map.peers.clone())?)
         .await?;
 
     Ok(())
+}
+
+async fn save_dns_snapshot(
+    state_dir: &PathBuf,
+    state: &AgentState,
+    dns_records: Vec<DnsRecord>,
+) -> Result<()> {
+    let mut updated_state = state.clone();
+    updated_state.dns_records = dns_records;
+    updated_state.save(state_dir)
 }
 
 fn network_map_to_relay_configs(
@@ -631,6 +653,8 @@ struct AgentState {
     network_id: Option<String>,
     ipv4: Option<String>,
     poll_interval_seconds: u64,
+    #[serde(default)]
+    dns_records: Vec<DnsRecord>,
 }
 
 impl AgentState {
@@ -727,10 +751,11 @@ mod tests {
                 endpoints: vec![test_endpoint_payload("lan", "192.168.1.30", 51820, "udp")],
                 allowed_routes: vec!["100.64.0.3/32".to_string()],
             }],
+            dns_records: Vec::new(),
             relays: Vec::new(),
         };
 
-        apply_network_map_to_backend(&backend, &state, network_map)
+        apply_network_map_to_backend(&backend, &state, &network_map)
             .await
             .expect("apply network map");
 
@@ -770,7 +795,7 @@ mod tests {
             },
         ];
 
-        apply_network_map_to_backend(&backend, &state, network_map)
+        apply_network_map_to_backend(&backend, &state, &network_map)
             .await
             .expect("apply network map");
 
@@ -789,10 +814,12 @@ mod tests {
             ipv4: Some("100.64.0.2".to_string()),
             ..AgentState::new()
         };
+        let state_dir = temp_state_dir("skip-unchanged-network-map");
         let mut last_applied_version = Some(7);
 
         apply_network_map_if_changed(
             &backend,
+            &state_dir,
             &state,
             network_map_with_version(7),
             &mut last_applied_version,
@@ -814,10 +841,12 @@ mod tests {
             ipv4: Some("100.64.0.2".to_string()),
             ..AgentState::new()
         };
+        let state_dir = temp_state_dir("apply-changed-network-map");
         let mut last_applied_version = Some(7);
 
         apply_network_map_if_changed(
             &backend,
+            &state_dir,
             &state,
             network_map_with_version(8),
             &mut last_applied_version,
@@ -832,6 +861,43 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn stores_dns_snapshot_from_network_map() {
+        let backend = MockBackend::new("mock-public-key");
+        let state_dir = temp_state_dir("dns-snapshot");
+        let state = AgentState {
+            device_id: Some("dev_self".to_string()),
+            ipv4: Some("100.64.0.2".to_string()),
+            ..AgentState::new()
+        };
+        state.save(&state_dir).expect("save initial state");
+        let mut network_map = network_map_with_version(9);
+        network_map.dns_records = vec![DnsRecord {
+            device_id: "dev_peer".to_string(),
+            name: "peer.mesh".to_string(),
+            record_type: "A".to_string(),
+            value: "100.64.0.3".to_string(),
+        }];
+        let mut last_applied_version = Some(8);
+
+        apply_network_map_if_changed(
+            &backend,
+            &state_dir,
+            &state,
+            network_map,
+            &mut last_applied_version,
+        )
+        .await
+        .expect("apply DNS snapshot");
+
+        let saved = AgentState::load(&state_dir)
+            .expect("load state")
+            .expect("state should exist");
+        assert_eq!(saved.dns_records.len(), 1);
+        assert_eq!(saved.dns_records[0].name, "peer.mesh");
+        assert_eq!(saved.dns_records[0].value, "100.64.0.3");
+    }
+
+    #[tokio::test]
     async fn maintains_peer_paths_after_changed_network_map() {
         let backend = MockBackend::new("mock-public-key");
         let state = AgentState {
@@ -839,10 +905,12 @@ mod tests {
             ipv4: Some("100.64.0.2".to_string()),
             ..AgentState::new()
         };
+        let state_dir = temp_state_dir("maintain-after-changed");
         let mut last_applied_version = None;
 
         apply_network_map_and_maintain_paths(
             &backend,
+            &state_dir,
             &state,
             network_map_with_version(8),
             &mut last_applied_version,
@@ -863,10 +931,12 @@ mod tests {
             ipv4: Some("100.64.0.2".to_string()),
             ..AgentState::new()
         };
+        let state_dir = temp_state_dir("maintain-unchanged");
         let mut last_applied_version = Some(8);
 
         apply_network_map_and_maintain_paths(
             &backend,
+            &state_dir,
             &state,
             network_map_with_version(8),
             &mut last_applied_version,
@@ -1037,8 +1107,18 @@ mod tests {
                 endpoints: Vec::new(),
                 allowed_routes: vec!["100.64.0.3/32".to_string()],
             }],
+            dns_records: Vec::new(),
             relays: Vec::new(),
         }
+    }
+
+    fn temp_state_dir(name: &str) -> PathBuf {
+        let path = std::env::temp_dir().join(format!(
+            "tfscale-agent-test-{name}-{}",
+            Uuid::now_v7().simple()
+        ));
+        fs::create_dir_all(&path).expect("create temp state dir");
+        path
     }
 
     fn test_endpoint_payload(
