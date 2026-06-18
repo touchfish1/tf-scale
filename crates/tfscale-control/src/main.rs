@@ -15,11 +15,23 @@ use tfscale_core::{
     protocol::{
         CreateAuthKeyResponse, DeviceSummary, EndpointPayload, HeartbeatRequest, HeartbeatResponse,
         NetworkMapPeer, NetworkMapResponse, NetworkMapSelf, RegisterDeviceRequest,
-        RegisterDeviceResponse,
+        RegisterDeviceResponse, RenameDeviceRequest,
     },
 };
 use tracing::{info, warn};
 use uuid::Uuid;
+
+const MIGRATIONS: &[Migration] = &[Migration {
+    version: 1,
+    name: "initial",
+    sql: include_str!("../migrations/0001_initial.sql"),
+}];
+
+struct Migration {
+    version: i64,
+    name: &'static str,
+    sql: &'static str,
+}
 
 #[derive(Debug, Parser)]
 #[command(name = "tfscaled", version, about = "tf-scale control plane")]
@@ -76,7 +88,10 @@ async fn serve(db: String, listen: String) -> AnyResult<()> {
         .route("/healthz", get(healthz))
         .route("/v1/auth-keys", post(create_auth_key))
         .route("/v1/devices", get(list_devices))
-        .route("/v1/devices/{device_id}", delete(delete_device))
+        .route(
+            "/v1/devices/{device_id}",
+            delete(delete_device).patch(rename_device),
+        )
         .route("/v1/agent/register", post(register_device))
         .route("/v1/agent/heartbeat", post(heartbeat))
         .route("/v1/agent/network-map", get(network_map))
@@ -90,78 +105,52 @@ async fn serve(db: String, listen: String) -> AnyResult<()> {
 }
 
 async fn init_schema(pool: &SqlitePool) -> AnyResult<()> {
-    for statement in [
+    sqlx::query(
         r#"
-        CREATE TABLE IF NOT EXISTS auth_keys (
-            id TEXT PRIMARY KEY,
-            key_hash TEXT NOT NULL UNIQUE,
-            description TEXT,
-            expires_at TEXT,
-            used_at TEXT,
-            reusable INTEGER NOT NULL DEFAULT 0,
-            created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
-            revoked_at TEXT
+        CREATE TABLE IF NOT EXISTS schema_migrations (
+            version INTEGER PRIMARY KEY,
+            name TEXT NOT NULL,
+            applied_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
         )
         "#,
-        r#"
-        CREATE TABLE IF NOT EXISTS devices (
-            id TEXT PRIMARY KEY,
-            network_id TEXT NOT NULL,
-            hostname TEXT NOT NULL,
-            machine_key TEXT NOT NULL UNIQUE,
-            node_key TEXT NOT NULL,
-            backend_type TEXT NOT NULL,
-            backend_public_credential TEXT NOT NULL,
-            ipv4 TEXT NOT NULL UNIQUE,
-            os TEXT NOT NULL,
-            arch TEXT NOT NULL,
-            client_version TEXT NOT NULL,
-            last_seen_at TEXT,
-            created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
-            updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
-            deleted_at TEXT
-        )
-        "#,
-        r#"
-        CREATE TABLE IF NOT EXISTS ip_allocations (
-            id TEXT PRIMARY KEY,
-            network_id TEXT NOT NULL,
-            device_id TEXT NOT NULL,
-            ip TEXT NOT NULL UNIQUE,
-            state TEXT NOT NULL,
-            created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
-            released_at TEXT
-        )
-        "#,
-        r#"
-        CREATE TABLE IF NOT EXISTS network_backends (
-            id TEXT PRIMARY KEY,
-            network_id TEXT NOT NULL,
-            backend_type TEXT NOT NULL,
-            capabilities TEXT NOT NULL DEFAULT '{}',
-            config TEXT NOT NULL DEFAULT '{}',
-            created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
-            updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
-        )
-        "#,
-        r#"
-        CREATE TABLE IF NOT EXISTS endpoints (
-            id TEXT PRIMARY KEY,
-            device_id TEXT NOT NULL,
-            kind TEXT NOT NULL,
-            address TEXT NOT NULL,
-            port INTEGER NOT NULL,
-            protocol TEXT NOT NULL,
-            source TEXT,
-            latency_ms INTEGER,
-            last_seen_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
-        )
-        "#,
-    ] {
-        sqlx::query(statement).execute(pool).await?;
+    )
+    .execute(pool)
+    .await?;
+
+    for migration in MIGRATIONS {
+        if migration_applied(pool, migration.version).await? {
+            continue;
+        }
+
+        let mut tx = pool.begin().await?;
+        for statement in migration_statements(migration.sql) {
+            sqlx::query(statement).execute(&mut *tx).await?;
+        }
+        sqlx::query("INSERT INTO schema_migrations (version, name) VALUES (?, ?)")
+            .bind(migration.version)
+            .bind(migration.name)
+            .execute(&mut *tx)
+            .await?;
+        tx.commit().await?;
     }
 
     Ok(())
+}
+
+async fn migration_applied(pool: &SqlitePool, version: i64) -> AnyResult<bool> {
+    let applied: Option<i64> =
+        sqlx::query_scalar("SELECT version FROM schema_migrations WHERE version = ?")
+            .bind(version)
+            .fetch_optional(pool)
+            .await?;
+
+    Ok(applied.is_some())
+}
+
+fn migration_statements(sql: &str) -> impl Iterator<Item = &str> {
+    sql.split(';')
+        .map(str::trim)
+        .filter(|statement| !statement.is_empty())
 }
 
 async fn healthz() -> Json<HealthResponse> {
@@ -236,6 +225,33 @@ async fn delete_device(
     Ok(StatusCode::NO_CONTENT)
 }
 
+async fn rename_device(
+    State(state): State<AppState>,
+    Path(device_id): Path<String>,
+    Json(request): Json<RenameDeviceRequest>,
+) -> std::result::Result<Json<DeviceSummary>, ApiError> {
+    let hostname = normalize_hostname(&request.hostname)?;
+    ensure_hostname_available(&state.pool, &device_id, &hostname).await?;
+
+    let result = sqlx::query(
+        r#"
+        UPDATE devices
+        SET hostname = ?, updated_at = CURRENT_TIMESTAMP
+        WHERE id = ? AND deleted_at IS NULL
+        "#,
+    )
+    .bind(&hostname)
+    .bind(&device_id)
+    .execute(&state.pool)
+    .await?;
+
+    if result.rows_affected() == 0 {
+        return Err(ApiError::not_found("device not found"));
+    }
+
+    Ok(Json(load_device_summary(&state.pool, &device_id).await?))
+}
+
 async fn register_device(
     State(state): State<AppState>,
     Json(request): Json<RegisterDeviceRequest>,
@@ -308,6 +324,91 @@ async fn register_device(
         network_id: network_id.to_string(),
         poll_interval_seconds: 5,
     }))
+}
+
+async fn load_device_summary(
+    pool: &SqlitePool,
+    device_id: &str,
+) -> std::result::Result<DeviceSummary, ApiError> {
+    let row = sqlx::query(
+        r#"
+        SELECT id, hostname, ipv4, os, arch, backend_type, last_seen_at
+        FROM devices
+        WHERE id = ? AND deleted_at IS NULL
+        "#,
+    )
+    .bind(device_id)
+    .fetch_optional(pool)
+    .await?;
+
+    let Some(row) = row else {
+        return Err(ApiError::not_found("device not found"));
+    };
+
+    Ok(DeviceSummary {
+        id: row.get("id"),
+        hostname: row.get("hostname"),
+        ipv4: row.get("ipv4"),
+        os: row.get("os"),
+        arch: row.get("arch"),
+        backend_type: row.get("backend_type"),
+        last_seen_at: row.get("last_seen_at"),
+    })
+}
+
+async fn ensure_hostname_available(
+    pool: &SqlitePool,
+    device_id: &str,
+    hostname: &str,
+) -> std::result::Result<(), ApiError> {
+    let existing: Option<String> = sqlx::query_scalar(
+        r#"
+        SELECT id
+        FROM devices
+        WHERE lower(hostname) = lower(?) AND id != ? AND deleted_at IS NULL
+        "#,
+    )
+    .bind(hostname)
+    .bind(device_id)
+    .fetch_optional(pool)
+    .await?;
+
+    if existing.is_some() {
+        return Err(ApiError::conflict("hostname already in use"));
+    }
+
+    Ok(())
+}
+
+fn normalize_hostname(value: &str) -> std::result::Result<String, ApiError> {
+    let hostname = value.trim().to_ascii_lowercase();
+
+    if hostname.is_empty() {
+        return Err(ApiError::bad_request("hostname is required"));
+    }
+
+    if hostname.len() > 63 {
+        return Err(ApiError::bad_request(
+            "hostname must be 63 characters or fewer",
+        ));
+    }
+
+    if hostname.starts_with('-') || hostname.ends_with('-') {
+        return Err(ApiError::bad_request(
+            "hostname cannot start or end with '-'",
+        ));
+    }
+
+    if !hostname
+        .bytes()
+        .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'-')
+    {
+        return Err(ApiError::bad_request(
+            "hostname can contain only lowercase letters, digits, and '-'",
+        ));
+    }
+
+    Ok(hostname)
 }
 
 async fn heartbeat(
@@ -569,6 +670,13 @@ struct ApiError {
 }
 
 impl ApiError {
+    fn bad_request(message: impl Into<String>) -> Self {
+        Self {
+            status: StatusCode::BAD_REQUEST,
+            message: message.into(),
+        }
+    }
+
     fn unauthorized(message: impl Into<String>) -> Self {
         Self {
             status: StatusCode::UNAUTHORIZED,
@@ -579,6 +687,13 @@ impl ApiError {
     fn not_found(message: impl Into<String>) -> Self {
         Self {
             status: StatusCode::NOT_FOUND,
+            message: message.into(),
+        }
+    }
+
+    fn conflict(message: impl Into<String>) -> Self {
+        Self {
+            status: StatusCode::CONFLICT,
             message: message.into(),
         }
     }
@@ -612,4 +727,49 @@ impl From<sqlx::Error> for ApiError {
 #[derive(Serialize)]
 struct ErrorResponse {
     error: String,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn normalizes_hostname() {
+        let hostname = normalize_hostname(" Dev-Box ").expect("hostname");
+
+        assert_eq!(hostname, "dev-box");
+    }
+
+    #[test]
+    fn rejects_empty_hostname() {
+        let error = normalize_hostname("   ").expect_err("empty hostname should fail");
+
+        assert_eq!(error.status, StatusCode::BAD_REQUEST);
+    }
+
+    #[test]
+    fn rejects_hostname_with_invalid_characters() {
+        let error = normalize_hostname("dev_box").expect_err("invalid hostname should fail");
+
+        assert_eq!(error.status, StatusCode::BAD_REQUEST);
+    }
+
+    #[test]
+    fn rejects_hostname_with_edge_hyphen() {
+        let error = normalize_hostname("-devbox").expect_err("invalid hostname should fail");
+
+        assert_eq!(error.status, StatusCode::BAD_REQUEST);
+    }
+
+    #[test]
+    fn splits_migration_statements() {
+        let statements =
+            migration_statements("CREATE TABLE one (id TEXT); ; CREATE TABLE two (id TEXT);")
+                .collect::<Vec<_>>();
+
+        assert_eq!(
+            statements,
+            vec!["CREATE TABLE one (id TEXT)", "CREATE TABLE two (id TEXT)"]
+        );
+    }
 }

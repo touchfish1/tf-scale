@@ -5,6 +5,9 @@ edition.workspace = true
 license.workspace = true
 repository.workspace = true
 
+[features]
+test-utils = []
+
 [dependencies]
 async-trait.workspace = true
 serde.workspace = true

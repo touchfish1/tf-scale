@@ -43,7 +43,7 @@ tf-scale/
 | TLS | `rustls` | Control and relay transport security |
 | HTTP client | `reqwest` | Agent and CLI calls to control plane APIs |
 | WebSocket | `tokio-tungstenite` | Optional streaming transport if needed |
-| TUN | `tun` or `tun-rs` | Platform-specific virtual interface support |
+| TUN | `tun-rs` | Platform-specific virtual interface support |
 
 ## Custom Backend Strategy
 
@@ -54,13 +54,17 @@ Preferred integration order:
 
 1. Define backend-neutral traits in `tfscale-net`.
 2. Implement `tfscale-custom` as the default v0.1 backend.
-3. Use userspace TUN on Linux and macOS.
+3. Use `tun-rs` for userspace TUN on Linux and macOS.
 4. Keep packet framing, encryption, and session management inside
    `tfscale-custom`.
 5. Add WireGuard or EasyTier later as optional backend crates if useful.
 
 The control plane stores backend public credentials only. Private credentials
 are generated and persisted locally by the agent.
+
+For v0.1, Linux address and route setup can use `iproute2` commands behind a
+small `tfscale-custom` platform module. Direct netlink integration can replace
+command execution later if the command boundary becomes limiting.
 
 ## Backend Abstraction
 

@@ -81,8 +81,8 @@ Current status:
 - Auth key creation, device registration, idempotent re-registration,
   heartbeat storage, device listing, device deletion, and full-mesh network map
   generation are implemented.
-- Remaining work: migrations should move from inline startup SQL to migration
-  files before the schema grows.
+- Schema setup now runs through versioned migration files.
+- Device rename is implemented with hostname validation and uniqueness checks.
 
 ## 3. CLI Admin Flows
 
@@ -94,9 +94,10 @@ Deliverables:
 
 Current status:
 
-- `auth-key create`, `device list`, and `device delete` call the HTTP API.
+- `auth-key create`, `device list`, `device rename`, and `device delete` call
+  the HTTP API.
 - `--json` output exists.
-- Remaining work: clearer error formatting.
+- HTTP API errors are formatted into concise CLI messages.
 
 ## 4. Agent Lifecycle and Local State
 
@@ -122,10 +123,12 @@ Current status:
 
 - `tfscale-agent up` creates local state, registers with the control plane,
   persists device identity, sends an initial heartbeat, fetches a network map,
-  and calls backend local/peer config methods.
+  calls backend local/peer config methods, then keeps running with heartbeat
+  and version-aware network-map polling.
 - `tfscale-agent status` reads local state and backend status.
 - `tfscale-agent down` calls backend shutdown.
-- Remaining work: long-running polling loop and richer backend status.
+- Remaining work: endpoint reporting and richer data-plane health once UDP
+  transport exists.
 
 ## 5. Network Backend Abstraction
 
@@ -164,8 +167,10 @@ Tasks:
 Current status:
 
 - Skeleton crate exists and implements the backend trait.
-- Remaining work: real credentials, stored private key material, session state,
-  and platform adapters.
+- Versioned X25519 identity material, local config, and peer session state are
+  persisted in a backend state file.
+- Remaining work: platform adapters, packet framing, crypto sessions, and real
+  packet transport.
 
 ## 7. Linux TUN Adapter
 
@@ -236,8 +241,9 @@ Deliverables:
 Current status:
 
 - Control plane network map generation is implemented.
-- Agent fetches and applies a network map once during `up`.
-- Remaining work: long-running polling loop and version-aware application.
+- Agent fetches and applies network maps during `up`.
+- Version-aware application skips unchanged network maps.
+- Remaining work: endpoint-aware updates once UDP transport exists.
 
 ## 12. End-to-End Validation
 

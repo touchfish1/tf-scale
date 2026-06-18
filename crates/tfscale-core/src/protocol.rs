@@ -18,6 +18,11 @@ pub struct DeviceSummary {
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct RenameDeviceRequest {
+    pub hostname: String,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct RegisterDeviceRequest {
     pub auth_key: String,
     pub hostname: String,

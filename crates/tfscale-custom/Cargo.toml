@@ -7,5 +7,16 @@ repository.workspace = true
 
 [dependencies]
 async-trait.workspace = true
+base64 = "0.22.1"
+serde.workspace = true
+serde_json.workspace = true
 tfscale-net = { path = "../tfscale-net" }
 uuid.workspace = true
+x25519-dalek = { version = "2.0.1", features = ["static_secrets", "getrandom"] }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+tun-rs = "2.8.5"
+
+[dev-dependencies]
+tfscale-core = { path = "../tfscale-core" }
+tokio.workspace = true

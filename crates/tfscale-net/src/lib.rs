@@ -112,3 +112,100 @@ pub trait NetworkBackend: Send + Sync {
     async fn status(&self) -> Result<BackendStatus>;
     async fn shutdown(&self) -> Result<()>;
 }
+
+#[cfg(any(test, feature = "test-utils"))]
+pub mod testing {
+    use super::*;
+    use std::sync::{Arc, Mutex};
+
+    #[derive(Clone, Debug)]
+    pub struct MockBackend {
+        state: Arc<Mutex<MockBackendState>>,
+        credential: BackendCredential,
+        backend_type: BackendType,
+        capabilities: BackendCapabilities,
+    }
+
+    #[derive(Clone, Debug, Default)]
+    pub struct MockBackendState {
+        pub ensure_credentials_calls: usize,
+        pub local_configs: Vec<LocalBackendConfig>,
+        pub peer_maps: Vec<Vec<PeerConfig>>,
+        pub shutdown_calls: usize,
+    }
+
+    impl MockBackend {
+        pub fn new(public_credential: impl Into<String>) -> Self {
+            Self {
+                state: Arc::new(Mutex::new(MockBackendState::default())),
+                credential: BackendCredential {
+                    public: public_credential.into(),
+                },
+                backend_type: BackendType::Custom("mock".to_string()),
+                capabilities: BackendCapabilities {
+                    supports_userspace_tun: true,
+                    supports_dynamic_peers: true,
+                    ..BackendCapabilities::default()
+                },
+            }
+        }
+
+        pub fn snapshot(&self) -> MockBackendState {
+            self.state.lock().expect("mock backend state lock").clone()
+        }
+    }
+
+    #[async_trait]
+    impl NetworkBackend for MockBackend {
+        fn backend_type(&self) -> BackendType {
+            self.backend_type.clone()
+        }
+
+        fn capabilities(&self) -> BackendCapabilities {
+            self.capabilities.clone()
+        }
+
+        async fn ensure_credentials(&self) -> Result<BackendCredential> {
+            self.state
+                .lock()
+                .expect("mock backend state lock")
+                .ensure_credentials_calls += 1;
+            Ok(self.credential.clone())
+        }
+
+        async fn apply_local_config(&self, config: LocalBackendConfig) -> Result<()> {
+            self.state
+                .lock()
+                .expect("mock backend state lock")
+                .local_configs
+                .push(config);
+            Ok(())
+        }
+
+        async fn apply_peer_map(&self, peers: Vec<PeerConfig>) -> Result<()> {
+            self.state
+                .lock()
+                .expect("mock backend state lock")
+                .peer_maps
+                .push(peers);
+            Ok(())
+        }
+
+        async fn status(&self) -> Result<BackendStatus> {
+            Ok(BackendStatus {
+                backend_type: self.backend_type(),
+                interface_name: "mock0".to_string(),
+                healthy: true,
+                message: None,
+            })
+        }
+
+        async fn shutdown(&self) -> Result<()> {
+            self.state
+                .lock()
+                .expect("mock backend state lock")
+                .shutdown_calls += 1;
+            Ok(())
+        }
+    }
+}
