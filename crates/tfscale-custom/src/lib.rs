@@ -40,6 +40,9 @@ use tun::{TunConfig, TunDevice, TunStatus};
 const STATE_VERSION: u32 = 1;
 const IDENTITY_SCHEME: &str = "x25519";
 const PUBLIC_CREDENTIAL_PREFIX: &str = "tfpk1_";
+const DIRECT_PROBE_INTERVAL: Duration = Duration::from_secs(5);
+const DIRECT_PROBE_STALE_AFTER: Duration = Duration::from_secs(15);
+const DIRECT_PROBE_FAILURE_THRESHOLD: u32 = 3;
 
 #[derive(Clone)]
 pub struct CustomBackend {
@@ -334,8 +337,8 @@ struct PeerPathState {
     active_endpoint: Option<Endpoint>,
     last_probe_at: Option<SystemTime>,
     last_success_at: Option<SystemTime>,
+    last_probe_sent_at_unix_millis: Option<u128>,
     failures: u32,
-    #[allow(dead_code)]
     rtt_ms: Option<u64>,
 }
 
@@ -346,6 +349,7 @@ impl Default for PeerPathState {
             active_endpoint: None,
             last_probe_at: None,
             last_success_at: None,
+            last_probe_sent_at_unix_millis: None,
             failures: 0,
             rtt_ms: None,
         }
@@ -443,26 +447,39 @@ impl RuntimeState {
 
     fn probe_peer_direct_paths(&mut self) -> Result<usize> {
         let mut sent = 0;
+        self.expire_stale_direct_paths(SystemTime::now());
         let Some(transport) = self.transport.as_mut() else {
             return Ok(0);
         };
 
         for peer in &self.persisted.peers {
+            let path_state = self
+                .peer_path_state_by_device
+                .entry(peer.device_id.clone())
+                .or_default();
+            if !peer_path_probe_due(path_state, SystemTime::now()) {
+                continue;
+            }
+
             let Some(session) = self
                 .peer_transport_sessions_by_device
                 .get_mut(&peer.device_id)
             else {
                 continue;
             };
+            let sent_at = now_unix_millis();
             for endpoint in sorted_udp_endpoints(&peer.endpoints) {
-                let frame = session.crypto.seal_message(b"probe", FRAME_TYPE_PROBE)?;
+                let frame = session
+                    .crypto
+                    .seal_message(format!("probe {sent_at}").as_bytes(), FRAME_TYPE_PROBE)?;
                 transport.send_frame(&endpoint, &frame)?;
                 sent += 1;
             }
-            self.peer_path_state_by_device
-                .entry(peer.device_id.clone())
-                .or_default()
-                .last_probe_at = Some(SystemTime::now());
+            path_state.last_probe_at = Some(SystemTime::now());
+            path_state.last_probe_sent_at_unix_millis = Some(sent_at);
+            if path_state.current_path != PeerPathKind::Direct {
+                path_state.failures = path_state.failures.saturating_add(1);
+            }
         }
 
         Ok(sent)
@@ -521,9 +538,10 @@ impl RuntimeState {
         match opened.message_type {
             FRAME_TYPE_DATA => Ok(Some(opened.plaintext)),
             FRAME_TYPE_PROBE => {
+                let response_payload = encode_probe_response_payload(&opened.plaintext);
                 let response = session
                     .crypto
-                    .seal_message(b"probe_response", FRAME_TYPE_PROBE_RESPONSE)?;
+                    .seal_message(&response_payload, FRAME_TYPE_PROBE_RESPONSE)?;
                 let endpoint = Endpoint {
                     kind: EndpointKind::Public,
                     address: source_addr.ip(),
@@ -536,7 +554,7 @@ impl RuntimeState {
                         BackendError::CommandFailed("UDP transport is not bound".to_string())
                     })?
                     .send_frame(&endpoint, &response)?;
-                self.mark_peer_direct(&device_id, endpoint);
+                self.mark_peer_direct(&device_id, endpoint, None);
                 Ok(None)
             }
             FRAME_TYPE_PROBE_RESPONSE => {
@@ -546,7 +564,8 @@ impl RuntimeState {
                     port: source_addr.port(),
                     protocol: TransportProtocol::Udp,
                 };
-                self.mark_peer_direct(&device_id, endpoint);
+                let rtt_ms = probe_response_rtt_ms(&opened.plaintext, now_unix_millis());
+                self.mark_peer_direct(&device_id, endpoint, rtt_ms);
                 Ok(None)
             }
             other => Err(BackendError::CommandFailed(format!(
@@ -555,7 +574,7 @@ impl RuntimeState {
         }
     }
 
-    fn mark_peer_direct(&mut self, device_id: &str, endpoint: Endpoint) {
+    fn mark_peer_direct(&mut self, device_id: &str, endpoint: Endpoint, rtt_ms: Option<u64>) {
         let state = self
             .peer_path_state_by_device
             .entry(device_id.to_string())
@@ -564,9 +583,32 @@ impl RuntimeState {
         state.active_endpoint = Some(endpoint.clone());
         state.last_success_at = Some(SystemTime::now());
         state.failures = 0;
+        state.rtt_ms = rtt_ms;
 
         if let Some(session) = self.peer_transport_sessions_by_device.get_mut(device_id) {
             session.endpoint = endpoint;
+        }
+    }
+
+    fn expire_stale_direct_paths(&mut self, now: SystemTime) {
+        for state in self.peer_path_state_by_device.values_mut() {
+            if state.current_path != PeerPathKind::Direct {
+                continue;
+            }
+
+            let stale = state
+                .last_success_at
+                .and_then(|last_success| now.duration_since(last_success).ok())
+                .map(|elapsed| elapsed >= DIRECT_PROBE_STALE_AFTER)
+                .unwrap_or(true);
+            if stale {
+                state.failures = state.failures.saturating_add(1);
+            }
+            if state.failures >= DIRECT_PROBE_FAILURE_THRESHOLD {
+                state.current_path = PeerPathKind::Unknown;
+                state.active_endpoint = None;
+                state.rtt_ms = None;
+            }
         }
     }
 
@@ -717,6 +759,59 @@ fn build_peer_transport_sessions(
     Ok(sessions)
 }
 
+fn peer_path_probe_due(state: &PeerPathState, now: SystemTime) -> bool {
+    state
+        .last_probe_at
+        .and_then(|last_probe| now.duration_since(last_probe).ok())
+        .map(|elapsed| elapsed >= DIRECT_PROBE_INTERVAL)
+        .unwrap_or(true)
+}
+
+fn encode_probe_response_payload(probe_payload: &[u8]) -> Vec<u8> {
+    let timestamp = probe_payload
+        .strip_prefix(b"probe ")
+        .and_then(|value| std::str::from_utf8(value).ok())
+        .and_then(|value| value.parse::<u128>().ok())
+        .unwrap_or_else(now_unix_millis);
+    format!("probe_response {timestamp}").into_bytes()
+}
+
+fn probe_response_rtt_ms(response_payload: &[u8], now_unix_millis: u128) -> Option<u64> {
+    let timestamp = response_payload
+        .strip_prefix(b"probe_response ")
+        .and_then(|value| std::str::from_utf8(value).ok())
+        .and_then(|value| value.parse::<u128>().ok())?;
+    now_unix_millis
+        .checked_sub(timestamp)
+        .and_then(|elapsed| elapsed.try_into().ok())
+}
+
+fn direct_path_status(peer_paths: &HashMap<String, PeerPathState>) -> String {
+    let mut paths = peer_paths
+        .iter()
+        .filter_map(|(device_id, state)| {
+            if state.current_path != PeerPathKind::Direct {
+                return None;
+            }
+            let endpoint = state.active_endpoint.as_ref()?;
+            let rtt = state
+                .rtt_ms
+                .map(|value| format!("{value}ms"))
+                .unwrap_or_else(|| "-".to_string());
+            Some(format!(
+                "{}@{}:{}/rtt={}",
+                device_id, endpoint.address, endpoint.port, rtt
+            ))
+        })
+        .collect::<Vec<_>>();
+    paths.sort();
+    if paths.is_empty() {
+        "none".to_string()
+    } else {
+        paths.join(",")
+    }
+}
+
 fn default_state_path() -> PathBuf {
     std::env::var_os("HOME")
         .map(PathBuf::from)
@@ -812,6 +907,13 @@ fn now_unix_seconds() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map(|duration| duration.as_secs())
+        .unwrap_or_default()
+}
+
+fn now_unix_millis() -> u128 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_millis())
         .unwrap_or_default()
 }
 
@@ -982,14 +1084,17 @@ impl NetworkBackend for CustomBackend {
             .is_some();
         let transport_peers = runtime.peer_udp_endpoints_by_device.len();
         let transport_sessions = runtime.peer_transport_sessions_by_device.len();
-        let direct_peers = self
+        let peer_path_state_by_device = self
             .state
             .lock()
             .map_err(|error| BackendError::CommandFailed(error.to_string()))?
             .peer_path_state_by_device
+            .clone();
+        let direct_peers = peer_path_state_by_device
             .values()
             .filter(|state| state.current_path == PeerPathKind::Direct)
             .count();
+        let direct_paths = direct_path_status(&peer_path_state_by_device);
         let reachable_peers = direct_peers;
         Ok(BackendStatus {
             backend_type: self.backend_type(),
@@ -999,7 +1104,7 @@ impl NetworkBackend for CustomBackend {
                 && transport_status.udp_bound
                 && transport_running,
             message: Some(format!(
-                "custom backend state: credentials={} local_config={} peers={} peer_indexes=device:{} overlay:{} crypto_peers={} udp_bound={} transport_running={} local_endpoints={} transport_peers={} transport_sessions={} direct_peers={} reachable_peers={} tx_packets={} rx_packets={} tx_drops={} rx_drops={} tun_configured={} tun_io_ready={} tun_message={} data_plane=transport_ready",
+                "custom backend state: credentials={} local_config={} peers={} peer_indexes=device:{} overlay:{} crypto_peers={} udp_bound={} transport_running={} local_endpoints={} transport_peers={} transport_sessions={} direct_peers={} direct_paths={} reachable_peers={} tx_packets={} rx_packets={} tx_drops={} rx_drops={} tun_configured={} tun_io_ready={} tun_message={} data_plane=transport_ready",
                 has_credentials,
                 has_local_config,
                 runtime.persisted.peers.len(),
@@ -1012,6 +1117,7 @@ impl NetworkBackend for CustomBackend {
                 transport_peers,
                 transport_sessions,
                 direct_peers,
+                direct_paths,
                 reachable_peers,
                 transport_status.tx_packets,
                 transport_status.rx_packets,
@@ -1546,11 +1652,58 @@ mod tests {
 
         let left_status = left.status().await.expect("left status");
         let right_status = right.status().await.expect("right status");
-        assert!(left_status.message.unwrap().contains("direct_peers=1"));
+        let left_message = left_status.message.unwrap();
+        assert!(left_message.contains("direct_peers=1"));
+        assert!(left_message.contains("direct_paths="));
+        assert!(left_message.contains("/rtt="));
         assert!(right_status.message.unwrap().contains("direct_peers=1"));
 
         cleanup_state(&left_state_path);
         cleanup_state(&right_state_path);
+    }
+
+    #[test]
+    fn probe_interval_limits_repeated_direct_probes() {
+        let mut state = PeerPathState::default();
+
+        assert!(peer_path_probe_due(&state, SystemTime::now()));
+        state.last_probe_at = Some(SystemTime::now());
+
+        assert!(!peer_path_probe_due(&state, SystemTime::now()));
+    }
+
+    #[test]
+    fn stale_direct_path_downgrades_to_unknown() {
+        let device_id = "dev_peer".to_string();
+        let mut runtime = RuntimeState::default();
+        runtime.peer_path_state_by_device.insert(
+            device_id.clone(),
+            PeerPathState {
+                current_path: PeerPathKind::Direct,
+                active_endpoint: Some(endpoint(Ipv4Addr::LOCALHOST, 51820)),
+                last_success_at: Some(SystemTime::now() - DIRECT_PROBE_STALE_AFTER),
+                failures: DIRECT_PROBE_FAILURE_THRESHOLD - 1,
+                ..PeerPathState::default()
+            },
+        );
+
+        runtime.expire_stale_direct_paths(SystemTime::now());
+
+        let state = runtime
+            .peer_path_state_by_device
+            .get(&device_id)
+            .expect("peer state");
+        assert_eq!(state.current_path, PeerPathKind::Unknown);
+        assert_eq!(state.active_endpoint, None);
+        assert_eq!(state.rtt_ms, None);
+    }
+
+    #[test]
+    fn computes_probe_response_rtt() {
+        let response = encode_probe_response_payload(b"probe 1000");
+
+        assert_eq!(response, b"probe_response 1000");
+        assert_eq!(probe_response_rtt_ms(&response, 1042), Some(42));
     }
 
     #[tokio::test]

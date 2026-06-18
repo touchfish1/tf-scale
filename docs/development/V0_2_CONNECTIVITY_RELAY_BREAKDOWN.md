@@ -114,7 +114,8 @@ POST /v1/agent/endpoint-probe
 
 状态：加密 `probe` / `probe_response` frame、endpoint ranking、backend direct path
 state、收到 probe 自动回 probe_response、收到 probe_response 后记录 active direct
-endpoint、agent 同步轮自动维护 peer paths 已实现。失败降级和 RTT 统计仍待实现。
+endpoint、agent 同步轮自动维护 peer paths、probe 间隔限流、RTT 统计、
+direct path 过期降级和 status direct endpoint 展示已实现。Phase 2 已完成。
 
 ### 目标
 
@@ -162,7 +163,7 @@ session、frame source/destination 和 nonce replay window。
 - 收到有效 probe 后回复 probe_response：已实现。
 - 收到 probe_response 后记录 active direct endpoint：已实现。
 - data packet 优先走 active direct endpoint：已实现为更新 peer session endpoint。
-- direct endpoint 连续失败后降级为 unknown，等待 relay 或重试：待实现。
+- direct endpoint 连续失败后降级为 unknown，等待 relay 或重试：已实现。
 
 ### Endpoint Ranking
 
@@ -185,7 +186,7 @@ session、frame source/destination 和 nonce replay window。
 - invalid probe 被拒绝。
 - endpoint ranking：已覆盖。
 - direct success 更新 peer path：已覆盖。
-- direct failure 触发降级。
+- direct failure 触发降级：已覆盖。
 
 ### 验收
 
