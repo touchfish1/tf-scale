@@ -16,7 +16,7 @@ use tfscale_core::{
         CreateAuthKeyResponse, DeviceSummary, EndpointPayload, EndpointProbeRequest,
         EndpointProbeResponse, HeartbeatRequest, HeartbeatResponse, NetworkMapPeer,
         NetworkMapResponse, NetworkMapSelf, RegisterDeviceRequest, RegisterDeviceResponse,
-        RenameDeviceRequest,
+        RelayMetadata, RenameDeviceRequest,
     },
 };
 use tokio::net::UdpSocket;
@@ -60,6 +60,9 @@ enum Command {
 
         #[arg(long, default_value = "127.0.0.1:3478")]
         udp_probe_listen: String,
+
+        #[arg(long = "relay-url")]
+        relay_urls: Vec<String>,
     },
 }
 
@@ -73,8 +76,9 @@ async fn main() -> AnyResult<()> {
             db,
             listen,
             udp_probe_listen,
+            relay_urls,
         } => {
-            serve(db, listen, udp_probe_listen).await?;
+            serve(db, listen, udp_probe_listen, relay_urls).await?;
         }
     }
 
@@ -91,9 +95,15 @@ fn init_tracing() {
 struct AppState {
     pool: SqlitePool,
     udp_probe_addr: SocketAddr,
+    relays: Vec<RelayMetadata>,
 }
 
-async fn serve(db: String, listen: String, udp_probe_listen: String) -> AnyResult<()> {
+async fn serve(
+    db: String,
+    listen: String,
+    udp_probe_listen: String,
+    relay_urls: Vec<String>,
+) -> AnyResult<()> {
     let database_url = format!("sqlite://{db}?mode=rwc");
     let pool = SqlitePoolOptions::new()
         .max_connections(5)
@@ -110,6 +120,7 @@ async fn serve(db: String, listen: String, udp_probe_listen: String) -> AnyResul
         .route("/healthz", get(healthz))
         .route("/v1/auth-keys", post(create_auth_key))
         .route("/v1/devices", get(list_devices))
+        .route("/v1/relays", get(list_relays))
         .route(
             "/v1/devices/{device_id}",
             delete(delete_device).patch(rename_device),
@@ -121,6 +132,7 @@ async fn serve(db: String, listen: String, udp_probe_listen: String) -> AnyResul
         .with_state(AppState {
             pool,
             udp_probe_addr,
+            relays: relay_metadata_from_urls(relay_urls),
         });
 
     let addr: SocketAddr = listen.parse()?;
@@ -132,6 +144,10 @@ async fn serve(db: String, listen: String, udp_probe_listen: String) -> AnyResul
     )
     .await?;
     Ok(())
+}
+
+async fn list_relays(State(state): State<AppState>) -> Json<Vec<RelayMetadata>> {
+    Json(state.relays)
 }
 
 async fn run_udp_endpoint_probe(socket: UdpSocket) {
@@ -595,7 +611,20 @@ async fn network_map(
             backend_type: self_row.get("backend_type"),
         },
         peers,
+        relays: state.relays,
     }))
+}
+
+fn relay_metadata_from_urls(urls: Vec<String>) -> Vec<RelayMetadata> {
+    urls.into_iter()
+        .enumerate()
+        .map(|(index, url)| RelayMetadata {
+            relay_id: format!("relay_{}", index + 1),
+            url,
+            region: "default".to_string(),
+            healthy: true,
+        })
+        .collect()
 }
 
 async fn validate_auth_key(pool: &SqlitePool, auth_key: &str) -> std::result::Result<(), ApiError> {
@@ -852,6 +881,17 @@ mod tests {
         let error = normalize_hostname("-devbox").expect_err("invalid hostname should fail");
 
         assert_eq!(error.status, StatusCode::BAD_REQUEST);
+    }
+
+    #[test]
+    fn builds_static_relay_metadata_from_urls() {
+        let relays = relay_metadata_from_urls(vec!["tcp://127.0.0.1:9443".to_string()]);
+
+        assert_eq!(relays.len(), 1);
+        assert_eq!(relays[0].relay_id, "relay_1");
+        assert_eq!(relays[0].url, "tcp://127.0.0.1:9443");
+        assert_eq!(relays[0].region, "default");
+        assert!(relays[0].healthy);
     }
 
     #[test]

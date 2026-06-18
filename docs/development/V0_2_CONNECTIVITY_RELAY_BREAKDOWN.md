@@ -196,6 +196,11 @@ session、frame source/destination 和 nonce replay window。
 
 ## Phase 3：Relay Fallback
 
+状态：`tfscale-relay` crate、JSON Lines relay 协议、session register、按目标
+device 转发 encrypted frame、unknown destination drop/error、control 静态 relay
+metadata 和 network map relays 字段已实现。agent/backend relay transport 和
+direct 失败后的 fallback 仍待实现。
+
 ### 目标
 
 新增 DERP-like relay 原型。direct 失败时，agent 自动通过 relay 转发密文 frame。
@@ -209,10 +214,10 @@ crates/tfscale-relay/
 最小能力：
 
 - `tfscale-relay serve --listen 0.0.0.0:9443`
-- agent 建立 WebSocket 或 HTTP/2 长连接。
-- agent register relay session。
-- relay 根据 destination device ID 转发 encrypted frame。
-- relay 不解密 payload。
+- agent 建立 WebSocket 或 HTTP/2 长连接：当前先以 TCP JSON Lines 原型实现。
+- agent register relay session：relay router 已实现，agent 接入待实现。
+- relay 根据 destination device ID 转发 encrypted frame：已实现。
+- relay 不解密 payload：已实现，payload 只作为 opaque string 转发。
 
 ### Relay 协议
 
@@ -234,8 +239,8 @@ crates/tfscale-relay/
 新增 relay metadata：
 
 - migration 增加 `relays` 表。
-- `GET /v1/relays` 返回可用 relay。
-- network map 附带 relay candidates。
+- `GET /v1/relays` 返回可用 relay：已实现静态 `--relay-url` 版本。
+- network map 附带 relay candidates：已实现。
 
 ### Agent/Backend
 
@@ -246,9 +251,9 @@ crates/tfscale-relay/
 
 ### 测试
 
-- relay session register。
-- relay frame route 到目标 session。
-- unknown destination 返回 drop/error。
+- relay session register：router 单测已覆盖。
+- relay frame route 到目标 session：已覆盖。
+- unknown destination 返回 drop/error：已覆盖。
 - direct failure 后选择 relay。
 - direct 恢复后切回 direct。
 

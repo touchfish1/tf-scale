@@ -708,6 +708,7 @@ mod tests {
                 endpoints: vec![test_endpoint_payload("lan", "192.168.1.30", 51820, "udp")],
                 allowed_routes: vec!["100.64.0.3/32".to_string()],
             }],
+            relays: Vec::new(),
         };
 
         apply_network_map_to_backend(&backend, &state, network_map)
@@ -981,6 +982,7 @@ mod tests {
                 endpoints: Vec::new(),
                 allowed_routes: vec!["100.64.0.3/32".to_string()],
             }],
+            relays: Vec::new(),
         }
     }
 

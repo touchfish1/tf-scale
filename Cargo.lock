@@ -2339,6 +2339,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "tfscale-relay"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "clap",
+ "serde_json",
+ "tfscale-core",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
 name = "tfscalectl"
 version = "0.1.0"
 dependencies = [

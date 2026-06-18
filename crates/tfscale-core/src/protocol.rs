@@ -101,6 +101,8 @@ pub struct NetworkMapResponse {
     pub network_map_version: i64,
     pub self_device: NetworkMapSelf,
     pub peers: Vec<NetworkMapPeer>,
+    #[serde(default)]
+    pub relays: Vec<RelayMetadata>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -120,4 +122,29 @@ pub struct NetworkMapPeer {
     pub backend_public_credential: String,
     pub endpoints: Vec<EndpointPayload>,
     pub allowed_routes: Vec<String>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct RelayMetadata {
+    pub relay_id: String,
+    pub url: String,
+    pub region: String,
+    pub healthy: bool,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum RelayMessage {
+    Register {
+        device_id: String,
+        node_key: String,
+    },
+    Frame {
+        source_device_id: String,
+        destination_device_id: String,
+        payload: String,
+    },
+    Error {
+        message: String,
+    },
 }
