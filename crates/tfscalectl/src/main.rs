@@ -3,7 +3,9 @@ use clap::{Parser, Subcommand};
 use reqwest::{Method, Response, StatusCode};
 use serde::Deserialize;
 use serde::de::DeserializeOwned;
-use tfscale_core::protocol::{CreateAuthKeyResponse, DeviceSummary, RenameDeviceRequest};
+use tfscale_core::protocol::{
+    CreateAuthKeyResponse, DeviceSummary, RelayMetadata, RenameDeviceRequest,
+};
 
 #[derive(Debug, Parser)]
 #[command(name = "tfscalectl", version, about = "tf-scale operator CLI")]
@@ -35,6 +37,10 @@ enum Command {
         #[command(subcommand)]
         command: DeviceCommand,
     },
+    Relay {
+        #[command(subcommand)]
+        command: RelayCommand,
+    },
 }
 
 #[derive(Debug, Subcommand)]
@@ -47,6 +53,11 @@ enum DeviceCommand {
     List,
     Rename { device_id: String, hostname: String },
     Delete { device_id: String },
+}
+
+#[derive(Debug, Subcommand)]
+enum RelayCommand {
+    List,
 }
 
 #[tokio::main]
@@ -122,6 +133,17 @@ async fn main() -> Result<()> {
                 );
             } else {
                 println!("deleted {device_id}");
+            }
+        }
+        Command::Relay {
+            command: RelayCommand::List,
+        } => {
+            let relays: Vec<RelayMetadata> =
+                request_json(&client, Method::GET, &cli.control_url, "/v1/relays", None).await?;
+            if cli.json {
+                println!("{}", serde_json::to_string_pretty(&relays)?);
+            } else {
+                print_relays(&relays);
             }
         }
     }
@@ -231,6 +253,17 @@ fn print_devices(devices: &[DeviceSummary]) {
             device.arch,
             device.backend_type,
             device.last_seen_at.as_deref().unwrap_or("-")
+        );
+    }
+}
+
+fn print_relays(relays: &[RelayMetadata]) {
+    println!("{:<16} {:<32} {:<12} HEALTHY", "ID", "URL", "REGION");
+
+    for relay in relays {
+        println!(
+            "{:<16} {:<32} {:<12} {}",
+            relay.relay_id, relay.url, relay.region, relay.healthy
         );
     }
 }

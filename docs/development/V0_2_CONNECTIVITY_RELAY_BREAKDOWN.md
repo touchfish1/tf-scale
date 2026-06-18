@@ -272,8 +272,9 @@ crates/tfscale-relay/
 ## Phase 4：Diagnostics & Validation
 
 状态：backend structured peer path diagnostics、`tfscale-agent status --json`
-peer 列表、`scripts/connectivity-relay-check.sh` 验证入口已实现。CLI relay list
-和更完整的中文验证文档仍待补充。
+peer 列表、`tfscalectl relay list`、`scripts/connectivity-relay-check.sh`
+验证入口和中文验证文档已实现。Phase 4 已完成，剩余主要是 Linux/macOS/NAT
+矩阵实机验证。
 
 ### 目标
 
@@ -301,11 +302,12 @@ peer 列表、`scripts/connectivity-relay-check.sh` 验证入口已实现。CLI 
 
 ### CLI
 
-可选新增：
+新增：
 
 ```sh
 tfscalectl device list --json
 tfscalectl relay list
+tfscalectl --json relay list
 ```
 
 ### 验证脚本
@@ -335,6 +337,9 @@ scripts/connectivity-relay-check.sh
 - NAT direct 验证文档。
 - relay fallback 验证文档。
 - 常见失败说明：endpoint 过期、UDP blocked、symmetric NAT、relay unavailable。
+
+中文验证步骤见
+[v0.2 连接穿透与 Relay 验证指南](V0_2_CONNECTIVITY_RELAY_VALIDATION.md)。
 
 ### 验收
 
