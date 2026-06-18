@@ -39,6 +39,7 @@ key="$(scripts/magicdns-local-check.sh make-key | tail -n 1)"
 sudo scripts/magicdns-local-check.sh agent --login-key "$key"
 scripts/magicdns-local-check.sh records
 scripts/magicdns-local-check.sh status
+scripts/magicdns-local-check.sh doctor
 ```
 
 找到 records 中的 `name` 和 `value` 后验证：
@@ -98,6 +99,20 @@ dig @127.0.0.1 -p 1053 missing.mesh A
 成功标准：
 
 - 返回 `NXDOMAIN`。
+
+如果解析失败，先运行：
+
+```sh
+scripts/magicdns-local-check.sh doctor
+```
+
+重点查看：
+
+- `state.registered`
+- `backend.healthy`
+- `dns.listener`
+- `dns.snapshot`
+- `dns.resolver_plan`
 
 ## Rename/Delete 验证
 

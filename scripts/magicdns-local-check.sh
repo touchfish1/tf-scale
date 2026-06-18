@@ -25,6 +25,7 @@ Usage:
   $0 make-key
   $0 agent --login-key <key> [--dns-listen <addr:port>]
   $0 status
+  $0 doctor
   $0 records
   $0 resolve --name <hostname.mesh> [--expect <100.64.0.x>]
   $0 cleanup
@@ -142,6 +143,10 @@ status() {
   TFSCALE_STATE_DIR="$STATE_DIR" "$TF_SCALE_AGENT" status --json
 }
 
+doctor() {
+  TFSCALE_STATE_DIR="$STATE_DIR" "$TF_SCALE_AGENT" doctor
+}
+
 records() {
   "$TF_SCALECTL" --control-url "$CONTROL_URL" dns records
 }
@@ -165,6 +170,7 @@ resolve_name() {
   printf '%s\n' "$answer"
 
   if [ -n "$expected" ] && [ "$answer" != "$expected" ]; then
+    printf 'hint: run "%s doctor" for agent and MagicDNS diagnostics\n' "$0" >&2
     fail "expected $name to resolve to $expected, got ${answer:-<empty>}"
   fi
 }
@@ -189,6 +195,7 @@ case "$cmd" in
   make-key) make_key ;;
   agent) start_agent "$@" ;;
   status) status ;;
+  doctor) doctor ;;
   records) records ;;
   resolve) resolve_name "$@" ;;
   cleanup) cleanup ;;

@@ -19,7 +19,7 @@ use tfscale_core::protocol::{
 use tfscale_custom::CustomBackend;
 use tfscale_net::{
     BackendCredential, Endpoint, EndpointKind, LocalBackendConfig, NetworkBackend, PeerConfig,
-    RelayConfig, TransportProtocol,
+    PeerPathDiagnosticKind, RelayConfig, TransportProtocol,
 };
 use tracing::{info, warn};
 use uuid::Uuid;
@@ -55,6 +55,10 @@ enum Command {
     Dns {
         #[command(subcommand)]
         command: DnsCommand,
+    },
+    Doctor {
+        #[arg(long)]
+        json: bool,
     },
     Status {
         #[arg(long)]
@@ -92,6 +96,17 @@ async fn main() -> Result<()> {
         } => {
             let state = AgentState::load(&state_dir)?.unwrap_or_default();
             print_dns_resolver_plan(&state);
+        }
+        Command::Doctor { json } => {
+            let backend = CustomBackend::with_state_dir(DEFAULT_INTERFACE_NAME, &state_dir);
+            let status = backend.status().await?;
+            let state = AgentState::load(&state_dir)?.unwrap_or_default();
+            let report = AgentDoctorReport::from_state_and_status(&state, &status);
+            if json {
+                println!("{}", serde_json::to_string_pretty(&report)?);
+            } else {
+                print_doctor_report(&report);
+            }
         }
         Command::Status { json } => {
             let backend = CustomBackend::with_state_dir(DEFAULT_INTERFACE_NAME, &state_dir);
@@ -174,6 +189,258 @@ impl AgentStatusOutput {
                 message: status.message,
                 peers: status.peers,
             },
+        }
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+enum DoctorLevel {
+    Ok,
+    Warn,
+    Fail,
+}
+
+impl DoctorLevel {
+    fn label(&self) -> &'static str {
+        match self {
+            Self::Ok => "OK",
+            Self::Warn => "WARN",
+            Self::Fail => "FAIL",
+        }
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+struct DoctorCheck {
+    id: String,
+    level: DoctorLevel,
+    summary: String,
+    detail: Option<String>,
+    suggestion: Option<String>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+struct AgentDoctorReport {
+    overall: DoctorLevel,
+    checks: Vec<DoctorCheck>,
+    next_steps: Vec<String>,
+}
+
+impl AgentDoctorReport {
+    fn from_state_and_status(state: &AgentState, status: &tfscale_net::BackendStatus) -> Self {
+        let mut checks = Vec::new();
+        checks.push(check_registered(state));
+        checks.push(check_backend(status));
+        checks.push(check_backend_peers(status));
+        checks.push(check_dns_listener(state));
+        checks.push(check_dns_snapshot(state));
+        checks.push(check_dns_resolver_plan(state));
+
+        let overall = overall_level(&checks);
+        let next_steps = next_steps(&checks);
+
+        Self {
+            overall,
+            checks,
+            next_steps,
+        }
+    }
+}
+
+fn check_registered(state: &AgentState) -> DoctorCheck {
+    let registered = state.device_id.is_some()
+        && state.node_key.is_some()
+        && state.network_id.is_some()
+        && state.ipv4.is_some();
+    if registered {
+        DoctorCheck {
+            id: "state.registered".to_string(),
+            level: DoctorLevel::Ok,
+            summary: format!(
+                "{} {}",
+                state.device_id.as_deref().unwrap_or("-"),
+                state.ipv4.as_deref().unwrap_or("-")
+            ),
+            detail: state.network_id.clone(),
+            suggestion: None,
+        }
+    } else {
+        DoctorCheck {
+            id: "state.registered".to_string(),
+            level: DoctorLevel::Fail,
+            summary: "agent is not registered".to_string(),
+            detail: None,
+            suggestion: Some("run tfscale-agent up --login-key <key>".to_string()),
+        }
+    }
+}
+
+fn check_backend(status: &tfscale_net::BackendStatus) -> DoctorCheck {
+    DoctorCheck {
+        id: "backend.healthy".to_string(),
+        level: if status.healthy {
+            DoctorLevel::Ok
+        } else {
+            DoctorLevel::Fail
+        },
+        summary: format!("{} {}", status.backend_type.as_str(), status.interface_name),
+        detail: status.message.clone(),
+        suggestion: if status.healthy {
+            None
+        } else {
+            Some("check TUN permissions and backend status message".to_string())
+        },
+    }
+}
+
+fn check_backend_peers(status: &tfscale_net::BackendStatus) -> DoctorCheck {
+    let direct = status
+        .peers
+        .iter()
+        .filter(|peer| peer.path == PeerPathDiagnosticKind::Direct)
+        .count();
+    let relay = status
+        .peers
+        .iter()
+        .filter(|peer| peer.path == PeerPathDiagnosticKind::Relay)
+        .count();
+    let unknown = status
+        .peers
+        .iter()
+        .filter(|peer| peer.path == PeerPathDiagnosticKind::Unknown)
+        .count();
+    let level = if unknown > 0 {
+        DoctorLevel::Warn
+    } else {
+        DoctorLevel::Ok
+    };
+
+    DoctorCheck {
+        id: "backend.peers".to_string(),
+        level,
+        summary: format!("direct={direct} relay={relay} unknown={unknown}"),
+        detail: Some(format!("total={}", status.peers.len())),
+        suggestion: if unknown > 0 {
+            Some("wait for endpoint probing or check relay availability".to_string())
+        } else {
+            None
+        },
+    }
+}
+
+fn check_dns_listener(state: &AgentState) -> DoctorCheck {
+    if !state.dns_enabled {
+        return DoctorCheck {
+            id: "dns.listener".to_string(),
+            level: DoctorLevel::Warn,
+            summary: "DNS listener has not been started".to_string(),
+            detail: Some(format!("listen={}", state.dns_listen)),
+            suggestion: Some("run tfscale-agent up to start MagicDNS".to_string()),
+        };
+    }
+
+    DoctorCheck {
+        id: "dns.listener".to_string(),
+        level: if state.dns_healthy {
+            DoctorLevel::Ok
+        } else {
+            DoctorLevel::Fail
+        },
+        summary: format!("{} records={}", state.dns_listen, state.dns_records.len()),
+        detail: state.dns_message.clone(),
+        suggestion: if state.dns_healthy {
+            Some(format!(
+                "test with: dig @{} {}.{} A",
+                state.dns_listen, "<hostname>", DEFAULT_DNS_SUFFIX
+            ))
+        } else {
+            Some("check whether the DNS port is already in use".to_string())
+        },
+    }
+}
+
+fn check_dns_snapshot(state: &AgentState) -> DoctorCheck {
+    if state.dns_records.is_empty() {
+        DoctorCheck {
+            id: "dns.snapshot".to_string(),
+            level: DoctorLevel::Warn,
+            summary: "no DNS records in local snapshot".to_string(),
+            detail: None,
+            suggestion: Some("check tfscalectl dns records and wait for agent sync".to_string()),
+        }
+    } else {
+        DoctorCheck {
+            id: "dns.snapshot".to_string(),
+            level: DoctorLevel::Ok,
+            summary: format!("records={}", state.dns_records.len()),
+            detail: state
+                .dns_records
+                .first()
+                .map(|record| format!("example={} -> {}", record.name, record.value)),
+            suggestion: None,
+        }
+    }
+}
+
+fn check_dns_resolver_plan(state: &AgentState) -> DoctorCheck {
+    let (nameserver, port) = dns_listen_parts(&state.dns_listen);
+    let config = resolver::ResolverConfig {
+        suffix: DEFAULT_DNS_SUFFIX.to_string(),
+        nameserver,
+        port,
+    };
+    let plan = resolver::current_platform_plan(&config);
+
+    DoctorCheck {
+        id: "dns.resolver_plan".to_string(),
+        level: DoctorLevel::Warn,
+        summary: format!("not installed; planned path={}", plan.config_path.display()),
+        detail: Some(format!("platform={:?}", plan.platform)),
+        suggestion: Some(
+            "run tfscale-agent dns plan; install support is the next phase".to_string(),
+        ),
+    }
+}
+
+fn overall_level(checks: &[DoctorCheck]) -> DoctorLevel {
+    if checks.iter().any(|check| check.level == DoctorLevel::Fail) {
+        DoctorLevel::Fail
+    } else if checks.iter().any(|check| check.level == DoctorLevel::Warn) {
+        DoctorLevel::Warn
+    } else {
+        DoctorLevel::Ok
+    }
+}
+
+fn next_steps(checks: &[DoctorCheck]) -> Vec<String> {
+    let mut steps = checks
+        .iter()
+        .filter_map(|check| check.suggestion.clone())
+        .collect::<Vec<_>>();
+    steps.dedup();
+    steps
+}
+
+fn print_doctor_report(report: &AgentDoctorReport) {
+    println!("tf-scale doctor overall={}", report.overall.label());
+    println!();
+    for check in &report.checks {
+        println!(
+            "{:<4} {:<22} {}",
+            check.level.label(),
+            check.id,
+            check.summary
+        );
+        if let Some(detail) = check.detail.as_deref() {
+            println!("     {:<22} {}", "", detail);
+        }
+    }
+    if !report.next_steps.is_empty() {
+        println!();
+        println!("Next:");
+        for step in &report.next_steps {
+            println!("  {step}");
         }
     }
 }
@@ -823,7 +1090,7 @@ fn state_file(state_dir: &PathBuf) -> PathBuf {
 mod tests {
     use super::*;
     use tfscale_core::protocol::NetworkMapSelf;
-    use tfscale_net::testing::MockBackend;
+    use tfscale_net::{BackendStatus, BackendType, PeerPathDiagnostic, testing::MockBackend};
 
     #[tokio::test]
     async fn new_agent_state_gets_backend_credentials_from_backend() {
@@ -855,6 +1122,73 @@ mod tests {
         let snapshot = backend.snapshot();
         assert_eq!(snapshot.ensure_credentials_calls, 1);
         assert_eq!(state.backend_public_credential, "mock-public-key");
+    }
+
+    #[test]
+    fn doctor_reports_unregistered_agent_failure() {
+        let state = AgentState::new();
+        let status = test_backend_status(Vec::new(), true);
+
+        let report = AgentDoctorReport::from_state_and_status(&state, &status);
+
+        assert_eq!(report.overall, DoctorLevel::Fail);
+        assert_eq!(
+            report
+                .checks
+                .iter()
+                .find(|check| check.id == "state.registered")
+                .expect("registered check")
+                .level,
+            DoctorLevel::Fail
+        );
+    }
+
+    #[test]
+    fn doctor_reports_dns_snapshot_and_peer_summary() {
+        let state = AgentState {
+            device_id: Some("dev_self".to_string()),
+            node_key: Some("node_self".to_string()),
+            network_id: Some("net_default".to_string()),
+            ipv4: Some("100.64.0.2".to_string()),
+            dns_enabled: true,
+            dns_healthy: true,
+            dns_listen: "127.0.0.1:1053".to_string(),
+            dns_records: vec![DnsRecord {
+                device_id: "dev_peer".to_string(),
+                name: "peer.mesh".to_string(),
+                record_type: "A".to_string(),
+                value: "100.64.0.3".to_string(),
+            }],
+            ..AgentState::new()
+        };
+        let status = test_backend_status(
+            vec![
+                test_peer_path("dev_a", PeerPathDiagnosticKind::Direct),
+                test_peer_path("dev_b", PeerPathDiagnosticKind::Relay),
+            ],
+            true,
+        );
+
+        let report = AgentDoctorReport::from_state_and_status(&state, &status);
+
+        assert_eq!(
+            report
+                .checks
+                .iter()
+                .find(|check| check.id == "dns.snapshot")
+                .expect("dns snapshot check")
+                .level,
+            DoctorLevel::Ok
+        );
+        assert_eq!(
+            report
+                .checks
+                .iter()
+                .find(|check| check.id == "backend.peers")
+                .expect("peer check")
+                .summary,
+            "direct=1 relay=1 unknown=0"
+        );
     }
 
     #[tokio::test]
@@ -1265,6 +1599,28 @@ mod tests {
 
     fn test_dns_runtime() -> dns::DnsRuntime {
         dns::DnsRuntime::new(Vec::new())
+    }
+
+    fn test_backend_status(peers: Vec<PeerPathDiagnostic>, healthy: bool) -> BackendStatus {
+        BackendStatus {
+            backend_type: BackendType::Tfscale,
+            interface_name: "tfscale0".to_string(),
+            healthy,
+            message: Some("test backend".to_string()),
+            peers,
+        }
+    }
+
+    fn test_peer_path(device_id: &str, path: PeerPathDiagnosticKind) -> PeerPathDiagnostic {
+        PeerPathDiagnostic {
+            device_id: device_id.to_string(),
+            path,
+            endpoint: None,
+            rtt_ms: None,
+            failures: 0,
+            tx_packets: 0,
+            rx_packets: 0,
+        }
     }
 
     fn test_endpoint_payload(

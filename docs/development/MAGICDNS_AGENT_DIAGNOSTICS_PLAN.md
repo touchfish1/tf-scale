@@ -116,6 +116,9 @@ doctor 不应代替 `status --json`，而是提供面向人的摘要和下一步
 
 ### Phase 1：Doctor Report
 
+状态：已实现。`tfscale-agent doctor` / `tfscale-agent doctor --json` 已输出本机
+state、backend、peer path、DNS listener、DNS snapshot 和 resolver plan 检查。
+
 - 新增 doctor 数据结构。
 - 从 `AgentState` 和 `BackendStatus` 构建 checks。
 - 文本输出和 JSON 输出。
@@ -123,12 +126,18 @@ doctor 不应代替 `status --json`，而是提供面向人的摘要和下一步
 
 ### Phase 2：MagicDNS Checks
 
+状态：已实现。doctor 会检查 MagicDNS listener、snapshot 记录数和 resolver plan，
+并给出 `dig`、`tfscalectl dns records`、`tfscale-agent dns plan` 等下一步建议。
+
 - 检查 DNS listener 状态。
 - 检查 DNS snapshot 是否为空。
 - 展示 resolver plan。
 - 如果 DNS snapshot 为空，建议检查 control DNS records 和 network map。
 
 ### Phase 3：脚本集成
+
+状态：已实现。`scripts/magicdns-local-check.sh doctor` 已接入，`resolve --expect`
+失败时会提示运行 doctor。
 
 - `scripts/magicdns-local-check.sh doctor`。
 - `resolve` 失败时提示运行 doctor。
