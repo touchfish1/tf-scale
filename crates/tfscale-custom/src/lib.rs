@@ -443,10 +443,9 @@ impl RuntimeState {
 
     fn probe_peer_direct_paths(&mut self) -> Result<usize> {
         let mut sent = 0;
-        let transport = self
-            .transport
-            .as_mut()
-            .ok_or_else(|| BackendError::CommandFailed("UDP transport is not bound".to_string()))?;
+        let Some(transport) = self.transport.as_mut() else {
+            return Ok(0);
+        };
 
         for peer in &self.persisted.peers {
             let Some(session) = self
@@ -938,6 +937,11 @@ impl NetworkBackend for CustomBackend {
         timeout: Duration,
     ) -> Result<Option<PublicEndpointProbe>> {
         self.probe_public_endpoint_blocking(probe_server, timeout)
+    }
+
+    async fn maintain_peer_paths(&self) -> Result<()> {
+        self.probe_peer_direct_paths()?;
+        Ok(())
     }
 
     async fn status(&self) -> Result<BackendStatus> {

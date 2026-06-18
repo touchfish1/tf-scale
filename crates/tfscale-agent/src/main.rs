@@ -271,13 +271,30 @@ async fn sync_agent_once(
 ) -> Result<()> {
     send_heartbeat(client, backend, control_url, state).await?;
     let network_map = fetch_network_map(client, control_url, state).await?;
-    apply_network_map_if_changed(
+    apply_network_map_and_maintain_paths(
         backend,
         state,
         network_map,
         last_applied_network_map_version,
     )
     .await
+}
+
+async fn apply_network_map_and_maintain_paths(
+    backend: &impl NetworkBackend,
+    state: &AgentState,
+    network_map: NetworkMapResponse,
+    last_applied_network_map_version: &mut Option<i64>,
+) -> Result<()> {
+    apply_network_map_if_changed(
+        backend,
+        state,
+        network_map,
+        last_applied_network_map_version,
+    )
+    .await?;
+    backend.maintain_peer_paths().await?;
+    Ok(())
 }
 
 async fn send_heartbeat(
@@ -756,6 +773,54 @@ mod tests {
         assert_eq!(snapshot.local_configs.len(), 1);
         assert_eq!(snapshot.peer_maps.len(), 1);
         assert_eq!(last_applied_version, Some(8));
+    }
+
+    #[tokio::test]
+    async fn maintains_peer_paths_after_changed_network_map() {
+        let backend = MockBackend::new("mock-public-key");
+        let state = AgentState {
+            device_id: Some("dev_self".to_string()),
+            ipv4: Some("100.64.0.2".to_string()),
+            ..AgentState::new()
+        };
+        let mut last_applied_version = None;
+
+        apply_network_map_and_maintain_paths(
+            &backend,
+            &state,
+            network_map_with_version(8),
+            &mut last_applied_version,
+        )
+        .await
+        .expect("maintain paths");
+
+        let snapshot = backend.snapshot();
+        assert_eq!(snapshot.peer_maps.len(), 1);
+        assert_eq!(snapshot.maintain_peer_paths_calls, 1);
+    }
+
+    #[tokio::test]
+    async fn maintains_peer_paths_when_network_map_is_unchanged() {
+        let backend = MockBackend::new("mock-public-key");
+        let state = AgentState {
+            device_id: Some("dev_self".to_string()),
+            ipv4: Some("100.64.0.2".to_string()),
+            ..AgentState::new()
+        };
+        let mut last_applied_version = Some(8);
+
+        apply_network_map_and_maintain_paths(
+            &backend,
+            &state,
+            network_map_with_version(8),
+            &mut last_applied_version,
+        )
+        .await
+        .expect("maintain paths");
+
+        let snapshot = backend.snapshot();
+        assert_eq!(snapshot.peer_maps.len(), 0);
+        assert_eq!(snapshot.maintain_peer_paths_calls, 1);
     }
 
     #[test]

@@ -124,6 +124,7 @@ pub trait NetworkBackend: Send + Sync {
         probe_server: SocketAddr,
         timeout: Duration,
     ) -> Result<Option<PublicEndpointProbe>>;
+    async fn maintain_peer_paths(&self) -> Result<()>;
     async fn status(&self) -> Result<BackendStatus>;
     async fn shutdown(&self) -> Result<()>;
 }
@@ -147,6 +148,7 @@ pub mod testing {
         pub ensure_credentials_calls: usize,
         pub local_configs: Vec<LocalBackendConfig>,
         pub peer_maps: Vec<Vec<PeerConfig>>,
+        pub maintain_peer_paths_calls: usize,
         pub shutdown_calls: usize,
     }
 
@@ -223,6 +225,14 @@ pub mod testing {
             _timeout: Duration,
         ) -> Result<Option<PublicEndpointProbe>> {
             Ok(None)
+        }
+
+        async fn maintain_peer_paths(&self) -> Result<()> {
+            self.state
+                .lock()
+                .expect("mock backend state lock")
+                .maintain_peer_paths_calls += 1;
+            Ok(())
         }
 
         async fn status(&self) -> Result<BackendStatus> {

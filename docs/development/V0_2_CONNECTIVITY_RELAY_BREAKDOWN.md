@@ -114,7 +114,7 @@ POST /v1/agent/endpoint-probe
 
 状态：加密 `probe` / `probe_response` frame、endpoint ranking、backend direct path
 state、收到 probe 自动回 probe_response、收到 probe_response 后记录 active direct
-endpoint 已实现。后台周期性 probe 调度、失败降级和 RTT 统计仍待实现。
+endpoint、agent 同步轮自动维护 peer paths 已实现。失败降级和 RTT 统计仍待实现。
 
 ### 目标
 
@@ -157,7 +157,8 @@ session、frame source/destination 和 nonce replay window。
 
 ### Transport 改动
 
-- 对每个 peer endpoint 启动 probe：已实现 backend 原语，后台调度待接入。
+- 对每个 peer endpoint 启动 probe：已实现，agent 每轮 sync 都会调用 backend
+  `maintain_peer_paths()`。
 - 收到有效 probe 后回复 probe_response：已实现。
 - 收到 probe_response 后记录 active direct endpoint：已实现。
 - data packet 优先走 active direct endpoint：已实现为更新 peer session endpoint。
