@@ -106,6 +106,21 @@ Phase 4 再做系统 resolver 接入：
 - macOS：写 `/etc/resolver/mesh`。
 - 完成后目标才是 `ping devbox.mesh`。
 
+详细设计见
+[v0.3 Phase 4 System Resolver 详细设计](V0_3_PHASE_4_SYSTEM_RESOLVER_DESIGN.md)。
+
+Phase 4 拆分：
+
+1. **Phase 4A：Resolver Plan**
+   - 状态：已实现。agent 已能生成 Linux systemd-resolved 和 macOS
+     `/etc/resolver/mesh` 的安装/清理计划，暂无系统副作用。
+   - 可用 `tfscale-agent dns plan` 查看当前平台的 resolver 配置计划。
+2. **Phase 4B：CLI Install/Uninstall**
+   - 新增 `tfscale-agent dns install|uninstall|status`。
+   - 写入或移除系统 resolver 配置。
+3. **Phase 4C：端到端验证**
+   - Linux/macOS 上验证 `ping devbox.mesh`。
+
 ## 验收
 
 - 注册设备后能通过 CLI 看到 `hostname.mesh`。

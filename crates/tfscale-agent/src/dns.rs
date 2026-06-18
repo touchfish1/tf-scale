@@ -36,6 +36,7 @@ impl DnsRuntime {
         *self.records.write().expect("DNS records lock") = records;
     }
 
+    #[cfg(test)]
     pub fn records_len(&self) -> usize {
         self.records.read().expect("DNS records lock").len()
     }

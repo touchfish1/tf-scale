@@ -1,4 +1,5 @@
 mod dns;
+mod resolver;
 
 use anyhow::{Context, Result, bail};
 use clap::{Parser, Subcommand};
@@ -51,10 +52,19 @@ enum Command {
         dns_listen: SocketAddr,
     },
     Down,
+    Dns {
+        #[command(subcommand)]
+        command: DnsCommand,
+    },
     Status {
         #[arg(long)]
         json: bool,
     },
+}
+
+#[derive(Debug, Subcommand)]
+enum DnsCommand {
+    Plan,
 }
 
 #[tokio::main]
@@ -76,6 +86,12 @@ async fn main() -> Result<()> {
             let backend = CustomBackend::with_state_dir(DEFAULT_INTERFACE_NAME, &state_dir);
             backend.shutdown().await?;
             println!("agent backend stopped");
+        }
+        Command::Dns {
+            command: DnsCommand::Plan,
+        } => {
+            let state = AgentState::load(&state_dir)?.unwrap_or_default();
+            print_dns_resolver_plan(&state);
         }
         Command::Status { json } => {
             let backend = CustomBackend::with_state_dir(DEFAULT_INTERFACE_NAME, &state_dir);
@@ -166,6 +182,40 @@ fn init_tracing() {
     let _ = tracing_subscriber::fmt()
         .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
         .try_init();
+}
+
+fn print_dns_resolver_plan(state: &AgentState) {
+    let (nameserver, port) = dns_listen_parts(&state.dns_listen);
+    let config = resolver::ResolverConfig {
+        suffix: DEFAULT_DNS_SUFFIX.to_string(),
+        nameserver,
+        port,
+    };
+    let plan = resolver::current_platform_plan(&config);
+
+    println!("platform={:?}", plan.platform);
+    println!("config_path={}", plan.config_path.display());
+    println!("install_content:");
+    print!("{}", plan.install_content);
+    if !plan.reload_commands.is_empty() {
+        println!("reload_commands:");
+        for command in plan.reload_commands {
+            println!("{}", command.join(" "));
+        }
+    }
+    if !plan.uninstall_paths.is_empty() {
+        println!("uninstall_paths:");
+        for path in plan.uninstall_paths {
+            println!("{}", path.display());
+        }
+    }
+}
+
+fn dns_listen_parts(value: &str) -> (String, u16) {
+    value
+        .parse::<SocketAddr>()
+        .map(|addr| (addr.ip().to_string(), addr.port()))
+        .unwrap_or_else(|_| ("127.0.0.1".to_string(), 1053))
 }
 
 async fn agent_up(
