@@ -52,6 +52,8 @@ overlay IP、同步 peer map、尝试 direct，失败则 relay，并通过 Magic
 
 开发项：
 
+- 先完成 MagicDNS 与 agent 一体化诊断：
+  [MagicDNS 与 Agent 一体化诊断计划](MAGICDNS_AGENT_DIAGNOSTICS_PLAN.md)。
 - `tfscale-agent dns install|uninstall|status`。
 - Linux systemd-resolved 配置写入和 reload。
 - macOS `/etc/resolver/mesh` 写入和清理。
@@ -160,10 +162,10 @@ tfscalectl device list --tag server
 
 ## 推荐立即执行顺序
 
-1. Phase 1A：实现 `tfscale-agent dns install|uninstall|status`。
-2. Phase 1B：扩展 MagicDNS 脚本，验证 `ping devbox.mesh`。
-3. Phase 2A：Linux systemd service install。
-4. Phase 3A：`tfscale-agent doctor`。
+1. Phase 1A：实现 `tfscale-agent doctor`，优先覆盖 MagicDNS 和 agent 本机状态。
+2. Phase 1B：实现 `tfscale-agent dns install|uninstall|status`。
+3. Phase 1C：扩展 MagicDNS 脚本，验证 `ping devbox.mesh`。
+4. Phase 2A：Linux systemd service install。
 5. Phase 4A：control TLS。
 
 ## 关键风险
