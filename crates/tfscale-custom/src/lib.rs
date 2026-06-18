@@ -6,8 +6,12 @@ use std::{
     fs,
     net::Ipv4Addr,
     path::{Path, PathBuf},
-    sync::{Arc, Mutex},
-    time::{SystemTime, UNIX_EPOCH},
+    sync::{
+        Arc, Mutex,
+        atomic::{AtomicBool, Ordering},
+    },
+    thread::{self, JoinHandle},
+    time::{Duration, SystemTime, UNIX_EPOCH},
 };
 use tfscale_net::{
     BackendCapabilities, BackendCredential, BackendError, BackendStatus, BackendType, Endpoint,
@@ -110,10 +114,12 @@ impl CustomBackend {
         let tun_status = runtime.tun_status.clone();
         let tun_device = runtime.tun_device.take();
         let transport = runtime.transport.take();
+        let transport_tasks = runtime.transport_tasks.take();
         *runtime = RuntimeState::from_persisted(state);
         runtime.tun_status = tun_status;
         runtime.tun_device = tun_device;
         runtime.transport = transport;
+        runtime.transport_tasks = transport_tasks;
         Ok(())
     }
 
@@ -133,20 +139,56 @@ impl CustomBackend {
             .map_err(|error| BackendError::CommandFailed(error.to_string()))?;
         runtime.tun_status = Some(status);
         runtime.tun_device = Some(device);
+        drop(runtime);
+        self.start_transport_tasks()?;
         Ok(())
     }
 
     fn bind_transport(&self, listen_port: u16) -> Result<()> {
+        self.stop_transport_tasks()?;
         self.state
             .lock()
             .map_err(|error| BackendError::CommandFailed(error.to_string()))?
             .transport
             .take();
         let transport = TransportRuntime::bind(listen_port)?;
-        self.state
+        {
+            let mut runtime = self
+                .state
+                .lock()
+                .map_err(|error| BackendError::CommandFailed(error.to_string()))?;
+            runtime.transport = Some(transport);
+        }
+        self.start_transport_tasks()?;
+        Ok(())
+    }
+
+    fn start_transport_tasks(&self) -> Result<()> {
+        let mut runtime = self
+            .state
+            .lock()
+            .map_err(|error| BackendError::CommandFailed(error.to_string()))?;
+        if runtime.transport_tasks.is_some()
+            || runtime.tun_device.is_none()
+            || runtime.transport.is_none()
+        {
+            return Ok(());
+        }
+
+        runtime.transport_tasks = Some(TransportTasks::start(Arc::clone(&self.state)));
+        Ok(())
+    }
+
+    fn stop_transport_tasks(&self) -> Result<()> {
+        let tasks = self
+            .state
             .lock()
             .map_err(|error| BackendError::CommandFailed(error.to_string()))?
-            .transport = Some(transport);
+            .transport_tasks
+            .take();
+        if let Some(tasks) = tasks {
+            tasks.stop();
+        }
         Ok(())
     }
 
@@ -225,6 +267,7 @@ struct RuntimeState {
     tun_status: Option<TunStatus>,
     tun_device: Option<TunDevice>,
     transport: Option<TransportRuntime>,
+    transport_tasks: Option<TransportTasks>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -294,6 +337,7 @@ impl RuntimeState {
             tun_status: None,
             tun_device: None,
             transport: None,
+            transport_tasks: None,
         }
     }
 
@@ -374,6 +418,113 @@ impl RuntimeState {
             }
         }
     }
+
+    fn try_read_tun_packet(&mut self, buffer: &mut [u8]) -> Result<Option<usize>> {
+        let Some(device) = self.tun_device.as_ref() else {
+            return Ok(None);
+        };
+        device.try_read_packet(buffer)
+    }
+
+    fn write_tun_packet(&mut self, packet: &[u8]) -> Result<usize> {
+        let Some(device) = self.tun_device.as_ref() else {
+            return Err(BackendError::CommandFailed(
+                "TUN device is not configured".to_string(),
+            ));
+        };
+        device.write_packet(packet)
+    }
+
+    fn record_rx_drop(&mut self) {
+        if let Some(transport) = self.transport.as_mut() {
+            transport.record_rx_drop();
+        }
+    }
+}
+
+struct TransportTasks {
+    stop: Arc<AtomicBool>,
+    handles: Vec<JoinHandle<()>>,
+}
+
+impl TransportTasks {
+    fn start(state: Arc<Mutex<RuntimeState>>) -> Self {
+        let stop = Arc::new(AtomicBool::new(false));
+        let handles = vec![
+            spawn_tun_to_udp_loop(Arc::clone(&state), Arc::clone(&stop)),
+            spawn_udp_to_tun_loop(state, Arc::clone(&stop)),
+        ];
+
+        Self { stop, handles }
+    }
+
+    fn stop(self) {
+        self.stop.store(true, Ordering::SeqCst);
+        for handle in self.handles {
+            let _ = handle.join();
+        }
+    }
+}
+
+fn spawn_tun_to_udp_loop(state: Arc<Mutex<RuntimeState>>, stop: Arc<AtomicBool>) -> JoinHandle<()> {
+    thread::spawn(move || {
+        let mut buffer = vec![0u8; 1500];
+        while !stop.load(Ordering::SeqCst) {
+            let packet = {
+                let mut runtime = match state.lock() {
+                    Ok(runtime) => runtime,
+                    Err(_) => break,
+                };
+                match runtime.try_read_tun_packet(&mut buffer) {
+                    Ok(Some(size)) => Some(buffer[..size].to_vec()),
+                    Ok(None) => None,
+                    Err(_) => {
+                        runtime.record_rx_drop();
+                        None
+                    }
+                }
+            };
+
+            if let Some(packet) = packet {
+                if let Ok(mut runtime) = state.lock() {
+                    let _ = runtime.send_overlay_packet(&packet);
+                }
+            } else {
+                thread::sleep(Duration::from_millis(10));
+            }
+        }
+    })
+}
+
+fn spawn_udp_to_tun_loop(state: Arc<Mutex<RuntimeState>>, stop: Arc<AtomicBool>) -> JoinHandle<()> {
+    thread::spawn(move || {
+        let mut buffer = vec![0u8; 1500];
+        while !stop.load(Ordering::SeqCst) {
+            let packet = {
+                let mut runtime = match state.lock() {
+                    Ok(runtime) => runtime,
+                    Err(_) => break,
+                };
+                match runtime.receive_overlay_packet(&mut buffer) {
+                    Ok(packet) => packet,
+                    Err(_) => {
+                        runtime.record_rx_drop();
+                        None
+                    }
+                }
+            };
+
+            if let Some(packet) = packet {
+                if let Ok(mut runtime) = state.lock() {
+                    if runtime.write_tun_packet(&packet).is_err() {
+                        runtime.record_rx_drop();
+                    }
+                }
+            } else {
+                thread::sleep(Duration::from_millis(10));
+            }
+        }
+    })
 }
 
 fn build_peer_transport_sessions(
@@ -581,8 +732,8 @@ impl NetworkBackend for CustomBackend {
             .local_config
             .expect("local config was just persisted");
         let tun_config = TunConfig::from_local_config(&config);
-        self.bind_transport(tun_config.listen_port)?;
         if !self.tun_setup_enabled {
+            self.bind_transport(tun_config.listen_port)?;
             let status = TunStatus::failed(
                 tun_config.interface_name.clone(),
                 "TUN setup skipped by backend configuration",
@@ -594,6 +745,7 @@ impl NetworkBackend for CustomBackend {
         match TunDevice::configure(&tun_config) {
             Ok(device) => {
                 self.set_tun_device(device)?;
+                self.bind_transport(tun_config.listen_port)?;
                 Ok(())
             }
             Err(error) => {
@@ -657,15 +809,24 @@ impl NetworkBackend for CustomBackend {
             .as_ref()
             .map(TransportRuntime::status)
             .unwrap_or_default();
+        let transport_running = self
+            .state
+            .lock()
+            .map_err(|error| BackendError::CommandFailed(error.to_string()))?
+            .transport_tasks
+            .is_some();
         let transport_peers = runtime.peer_udp_endpoints_by_device.len();
         let transport_sessions = runtime.peer_transport_sessions_by_device.len();
         let reachable_peers = transport_peers;
         Ok(BackendStatus {
             backend_type: self.backend_type(),
             interface_name: self.interface_name.clone(),
-            healthy: tun_configured && tun_io_ready && transport_status.udp_bound,
+            healthy: tun_configured
+                && tun_io_ready
+                && transport_status.udp_bound
+                && transport_running,
             message: Some(format!(
-                "custom backend state: credentials={} local_config={} peers={} peer_indexes=device:{} overlay:{} crypto_peers={} udp_bound={} local_endpoints={} transport_peers={} transport_sessions={} reachable_peers={} tx_packets={} rx_packets={} tx_drops={} rx_drops={} tun_configured={} tun_io_ready={} tun_message={} data_plane=transport_ready",
+                "custom backend state: credentials={} local_config={} peers={} peer_indexes=device:{} overlay:{} crypto_peers={} udp_bound={} transport_running={} local_endpoints={} transport_peers={} transport_sessions={} reachable_peers={} tx_packets={} rx_packets={} tx_drops={} rx_drops={} tun_configured={} tun_io_ready={} tun_message={} data_plane=transport_ready",
                 has_credentials,
                 has_local_config,
                 runtime.persisted.peers.len(),
@@ -673,6 +834,7 @@ impl NetworkBackend for CustomBackend {
                 runtime.peers_by_overlay_ip.len(),
                 runtime.peer_crypto_material_by_device.len(),
                 transport_status.udp_bound,
+                transport_running,
                 transport_status.local_endpoints,
                 transport_peers,
                 transport_sessions,
@@ -689,6 +851,7 @@ impl NetworkBackend for CustomBackend {
     }
 
     async fn shutdown(&self) -> Result<()> {
+        self.stop_transport_tasks()?;
         self.state
             .lock()
             .map_err(|error| BackendError::CommandFailed(error.to_string()))?
@@ -893,6 +1056,7 @@ mod tests {
         assert!(!status.healthy);
         assert!(message.contains("crypto_peers=1"));
         assert!(message.contains("udp_bound=true"));
+        assert!(message.contains("transport_running=false"));
         assert!(message.contains("local_endpoints=1"));
         assert!(message.contains("tun_configured=false"));
         assert!(message.contains("tun_io_ready=false"));

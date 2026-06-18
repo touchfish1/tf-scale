@@ -42,12 +42,16 @@ Implemented in the current development branch:
 - Backend-level helpers can receive encrypted UDP frames, select the peer crypto
   session by frame source, decrypt plaintext packets, and update receive
   counters.
+- TUN devices are configured nonblocking where supported.
+- The backend starts cancellable transport tasks once both TUN and UDP are
+  ready.
+- The TUN-to-UDP task reads packets from TUN and sends encrypted UDP frames.
+- The UDP-to-TUN task receives encrypted UDP frames and writes plaintext packets
+  back to TUN.
+- Shutdown stops transport tasks before closing UDP and TUN resources.
 
 Still remaining:
 
-- Add transport task lifecycle and cancellation around the blocking TUN loop.
-- Connect the tested packet helpers to `TunDevice::read_packet()` and
-  `TunDevice::write_packet()`.
 - Run privileged Linux validation with real TUN devices.
 
 ## Architecture

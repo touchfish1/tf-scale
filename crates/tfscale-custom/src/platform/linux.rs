@@ -49,6 +49,26 @@ impl LinuxTunDevice {
         }
     }
 
+    pub(crate) fn try_read_packet(&self, buffer: &mut [u8]) -> Result<Option<usize>> {
+        #[cfg(target_os = "linux")]
+        {
+            match self.device.recv(buffer) {
+                Ok(bytes) => Ok(Some(bytes)),
+                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => Ok(None),
+                Err(error) => Err(BackendError::CommandFailed(error.to_string())),
+            }
+        }
+
+        #[cfg(not(target_os = "linux"))]
+        {
+            let _ = buffer;
+            Err(BackendError::UnsupportedPlatform(format!(
+                "Linux TUN read cannot run on {}",
+                std::env::consts::OS
+            )))
+        }
+    }
+
     pub(crate) fn write_packet(&self, packet: &[u8]) -> Result<usize> {
         #[cfg(target_os = "linux")]
         {
@@ -100,14 +120,18 @@ fn configure_tun_device(config: &TunConfig) -> Result<tun_rs::SyncDevice> {
         ));
     }
 
-    tun_rs::DeviceBuilder::new()
+    let device = tun_rs::DeviceBuilder::new()
         .name(&config.interface_name)
         .ipv4(config.overlay_ip, 32, None)
         .enable(false)
         .build_sync()
         .map_err(|error| {
             BackendError::CommandFailed(format!("failed to create TUN device: {error}"))
-        })
+        })?;
+    device
+        .set_nonblocking(true)
+        .map_err(|error| BackendError::CommandFailed(error.to_string()))?;
+    Ok(device)
 }
 
 pub(crate) fn plan_ip_commands(config: &TunConfig) -> Vec<PlannedCommand> {

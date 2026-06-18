@@ -71,6 +71,10 @@ impl TunDevice {
         self.inner.read_packet(buffer)
     }
 
+    pub fn try_read_packet(&self, buffer: &mut [u8]) -> Result<Option<usize>> {
+        self.inner.try_read_packet(buffer)
+    }
+
     #[allow(dead_code)]
     pub fn write_packet(&self, packet: &[u8]) -> Result<usize> {
         self.inner.write_packet(packet)
@@ -103,6 +107,19 @@ impl PlatformTunDevice {
         #[cfg(target_os = "linux")]
         {
             self.inner.read_packet(buffer)
+        }
+
+        #[cfg(not(target_os = "linux"))]
+        {
+            let _ = buffer;
+            Err(unsupported_platform_error())
+        }
+    }
+
+    pub fn try_read_packet(&self, buffer: &mut [u8]) -> Result<Option<usize>> {
+        #[cfg(target_os = "linux")]
+        {
+            self.inner.try_read_packet(buffer)
         }
 
         #[cfg(not(target_os = "linux"))]
