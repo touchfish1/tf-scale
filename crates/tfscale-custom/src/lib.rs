@@ -4,7 +4,8 @@ use serde::{Deserialize, Serialize};
 use std::{
     collections::HashMap,
     fs,
-    net::{IpAddr, Ipv4Addr, SocketAddr},
+    io::{BufRead, BufReader, Write},
+    net::{IpAddr, Ipv4Addr, SocketAddr, TcpStream},
     path::{Path, PathBuf},
     sync::{
         Arc, Mutex,
@@ -345,6 +346,80 @@ impl RelayFrameSender for NullRelayFrameSender {
     }
 }
 
+struct TcpRelayFrameSender {
+    relay: RelayConfig,
+    device_id: String,
+    node_key: String,
+    writer: Mutex<Option<TcpStream>>,
+}
+
+impl TcpRelayFrameSender {
+    fn new(relay: RelayConfig, device_id: String, node_key: String) -> Self {
+        Self {
+            relay,
+            device_id,
+            node_key,
+            writer: Mutex::new(None),
+        }
+    }
+
+    fn ensure_connected(&self) -> Result<()> {
+        let mut writer = self
+            .writer
+            .lock()
+            .map_err(|error| BackendError::CommandFailed(error.to_string()))?;
+        if writer.is_some() {
+            return Ok(());
+        }
+
+        let mut stream = TcpStream::connect(relay_tcp_addr(&self.relay.url)?)
+            .map_err(|error| BackendError::CommandFailed(error.to_string()))?;
+        write_relay_message(
+            &mut stream,
+            &RelayMessage::Register {
+                device_id: self.device_id.clone(),
+                node_key: self.node_key.clone(),
+            },
+        )?;
+        *writer = Some(stream);
+        Ok(())
+    }
+}
+
+impl RelayFrameSender for TcpRelayFrameSender {
+    fn send_frame(&self, _destination_device_id: &str, message: RelayMessage) -> Result<usize> {
+        self.ensure_connected()?;
+        let mut writer = self
+            .writer
+            .lock()
+            .map_err(|error| BackendError::CommandFailed(error.to_string()))?;
+        let writer = writer.as_mut().ok_or_else(|| {
+            BackendError::CommandFailed("relay transport is not connected".to_string())
+        })?;
+        write_relay_message(writer, &message)?;
+
+        let RelayMessage::Frame { payload, .. } = message else {
+            return Ok(0);
+        };
+        Ok(payload.len())
+    }
+}
+
+fn write_relay_message(writer: &mut TcpStream, message: &RelayMessage) -> Result<()> {
+    let mut line = serde_json::to_vec(message)
+        .map_err(|error| BackendError::CommandFailed(error.to_string()))?;
+    line.push(b'\n');
+    writer
+        .write_all(&line)
+        .map_err(|error| BackendError::CommandFailed(error.to_string()))?;
+    Ok(())
+}
+
+fn relay_tcp_addr(url: &str) -> Result<&str> {
+    url.strip_prefix("tcp://")
+        .ok_or_else(|| BackendError::CommandFailed(format!("unsupported relay URL: {url}")))
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 struct PeerCryptoMaterial {
     #[allow(dead_code)]
@@ -558,7 +633,25 @@ impl RuntimeState {
             return Ok(None);
         };
 
-        let decoded = match EncodedFrame::decode(&buffer[..received]) {
+        self.open_received_frame(&buffer[..received], Some(source_addr))
+    }
+
+    fn open_relay_frame(&mut self, message: RelayMessage) -> Result<Option<Vec<u8>>> {
+        let RelayMessage::Frame { payload, .. } = message else {
+            return Ok(None);
+        };
+        let frame = URL_SAFE_NO_PAD
+            .decode(payload)
+            .map_err(|error| BackendError::CommandFailed(error.to_string()))?;
+        self.open_received_frame(&frame, None)
+    }
+
+    fn open_received_frame(
+        &mut self,
+        frame: &[u8],
+        source_addr: Option<SocketAddr>,
+    ) -> Result<Option<Vec<u8>>> {
+        let decoded = match EncodedFrame::decode(frame) {
             Ok(decoded) => decoded,
             Err(error) => {
                 if let Some(transport) = self.transport.as_mut() {
@@ -588,7 +681,7 @@ impl RuntimeState {
                     "peer transport session is not ready: {device_id}"
                 ))
             })?;
-        let opened = match session.crypto.open_message(&buffer[..received]) {
+        let opened = match session.crypto.open_message(frame) {
             Ok(opened) => opened,
             Err(error) => {
                 if let Some(transport) = self.transport.as_mut() {
@@ -601,6 +694,9 @@ impl RuntimeState {
         match opened.message_type {
             FRAME_TYPE_DATA => Ok(Some(opened.plaintext)),
             FRAME_TYPE_PROBE => {
+                let Some(source_addr) = source_addr else {
+                    return Ok(None);
+                };
                 let response_payload = encode_probe_response_payload(&opened.plaintext);
                 let response = session
                     .crypto
@@ -621,6 +717,9 @@ impl RuntimeState {
                 Ok(None)
             }
             FRAME_TYPE_PROBE_RESPONSE => {
+                let Some(source_addr) = source_addr else {
+                    return Ok(None);
+                };
                 let endpoint = Endpoint {
                     kind: EndpointKind::Public,
                     address: source_addr.ip(),
@@ -711,10 +810,13 @@ struct TransportTasks {
 impl TransportTasks {
     fn start(state: Arc<Mutex<RuntimeState>>) -> Self {
         let stop = Arc::new(AtomicBool::new(false));
-        let handles = vec![
+        let mut handles = vec![
             spawn_tun_to_udp_loop(Arc::clone(&state), Arc::clone(&stop)),
-            spawn_udp_to_tun_loop(state, Arc::clone(&stop)),
+            spawn_udp_to_tun_loop(Arc::clone(&state), Arc::clone(&stop)),
         ];
+        if let Some(handle) = spawn_relay_to_tun_loop(state, Arc::clone(&stop)) {
+            handles.push(handle);
+        }
 
         Self { stop, handles }
     }
@@ -786,6 +888,70 @@ fn spawn_udp_to_tun_loop(state: Arc<Mutex<RuntimeState>>, stop: Arc<AtomicBool>)
             }
         }
     })
+}
+
+fn spawn_relay_to_tun_loop(
+    state: Arc<Mutex<RuntimeState>>,
+    stop: Arc<AtomicBool>,
+) -> Option<JoinHandle<()>> {
+    let (relay, device_id) = {
+        let runtime = state.lock().ok()?;
+        let relay = runtime.relays.first()?.clone();
+        let device_id = runtime.persisted.local_config.as_ref()?.device_id.clone();
+        (relay, device_id)
+    };
+
+    Some(thread::spawn(move || {
+        let mut stream = match TcpStream::connect(match relay_tcp_addr(&relay.url) {
+            Ok(addr) => addr,
+            Err(_) => return,
+        }) {
+            Ok(stream) => stream,
+            Err(_) => return,
+        };
+        if write_relay_message(
+            &mut stream,
+            &RelayMessage::Register {
+                device_id,
+                node_key: String::new(),
+            },
+        )
+        .is_err()
+        {
+            return;
+        }
+
+        let mut reader = BufReader::new(stream);
+        while !stop.load(Ordering::SeqCst) {
+            let mut line = String::new();
+            match reader.read_line(&mut line) {
+                Ok(0) => break,
+                Ok(_) => {
+                    let packet = match serde_json::from_str::<RelayMessage>(&line) {
+                        Ok(message) => match state.lock() {
+                            Ok(mut runtime) => match runtime.open_relay_frame(message) {
+                                Ok(packet) => packet,
+                                Err(_) => {
+                                    runtime.record_rx_drop();
+                                    None
+                                }
+                            },
+                            Err(_) => break,
+                        },
+                        Err(_) => None,
+                    };
+                    if let Some(packet) = packet {
+                        if let Ok(mut runtime) = state.lock() {
+                            if runtime.write_tun_packet(&packet).is_err() {
+                                runtime.record_rx_drop();
+                            }
+                        }
+                    }
+                }
+                Err(_) => break,
+            }
+        }
+    }))
 }
 
 fn build_peer_transport_sessions(
@@ -1090,10 +1256,25 @@ impl NetworkBackend for CustomBackend {
     }
 
     async fn apply_relay_map(&self, relays: Vec<RelayConfig>) -> Result<()> {
-        self.state
+        let mut runtime = self
+            .state
             .lock()
-            .map_err(|error| BackendError::CommandFailed(error.to_string()))?
-            .relays = relays;
+            .map_err(|error| BackendError::CommandFailed(error.to_string()))?;
+        runtime.relay_sender = runtime
+            .persisted
+            .local_config
+            .as_ref()
+            .and_then(|config| {
+                relays.first().cloned().map(|relay| {
+                    Box::new(TcpRelayFrameSender::new(
+                        relay,
+                        config.device_id.clone(),
+                        String::new(),
+                    )) as Box<dyn RelayFrameSender>
+                })
+            })
+            .unwrap_or_else(|| Box::new(NullRelayFrameSender));
+        runtime.relays = relays;
         Ok(())
     }
 
@@ -1667,6 +1848,143 @@ mod tests {
         assert!(!frames[0].payload.is_empty());
 
         cleanup_state(&state_path);
+    }
+
+    #[tokio::test]
+    async fn opens_overlay_packet_from_relay_frame() {
+        let left_state_path = temp_state_path("relay-open-left");
+        let right_state_path = temp_state_path("relay-open-right");
+        let left = test_backend(&left_state_path);
+        let right = test_backend(&right_state_path);
+        let left_device_id = DeviceId::new().to_string();
+        let right_device_id = DeviceId::new().to_string();
+        let left_credential = left.ensure_credentials().await.expect("left credentials");
+        let right_credential = right.ensure_credentials().await.expect("right credentials");
+
+        left.apply_local_config(LocalBackendConfig {
+            device_id: left_device_id.clone(),
+            interface_name: "tfscale0".to_string(),
+            overlay_ip: Ipv4Addr::new(100, 64, 0, 2),
+            listen_port: 0,
+        })
+        .await
+        .expect("left local config");
+        right
+            .apply_local_config(LocalBackendConfig {
+                device_id: right_device_id.clone(),
+                interface_name: "tfscale0".to_string(),
+                overlay_ip: Ipv4Addr::new(100, 64, 0, 3),
+                listen_port: 0,
+            })
+            .await
+            .expect("right local config");
+        left.apply_peer_map(vec![PeerConfig {
+            public_credential: right_credential,
+            endpoints: vec![endpoint(Ipv4Addr::LOCALHOST, 51820)],
+            ..test_peer(&right_device_id, Ipv4Addr::new(100, 64, 0, 3))
+        }])
+        .await
+        .expect("left peer map");
+        right
+            .apply_peer_map(vec![PeerConfig {
+                public_credential: left_credential,
+                endpoints: vec![endpoint(Ipv4Addr::LOCALHOST, 51820)],
+                ..test_peer(&left_device_id, Ipv4Addr::new(100, 64, 0, 2))
+            }])
+            .await
+            .expect("right peer map");
+
+        let frame = {
+            let mut runtime = left.state.lock().expect("left runtime");
+            let session = runtime
+                .peer_transport_sessions_by_device
+                .get_mut(&right_device_id)
+                .expect("right session");
+            session
+                .crypto
+                .seal(&ipv4_packet(
+                    Ipv4Addr::new(100, 64, 0, 2),
+                    Ipv4Addr::new(100, 64, 0, 3),
+                ))
+                .expect("sealed frame")
+        };
+        let message = RelayMessage::Frame {
+            source_device_id: left_device_id,
+            destination_device_id: right_device_id,
+            payload: URL_SAFE_NO_PAD.encode(frame),
+        };
+
+        let packet = right
+            .state
+            .lock()
+            .expect("right runtime")
+            .open_relay_frame(message)
+            .expect("open relay frame")
+            .expect("packet");
+
+        assert_eq!(
+            packet,
+            ipv4_packet(Ipv4Addr::new(100, 64, 0, 2), Ipv4Addr::new(100, 64, 0, 3))
+        );
+        cleanup_state(&left_state_path);
+        cleanup_state(&right_state_path);
+    }
+
+    #[test]
+    fn tcp_relay_sender_registers_and_writes_frame() {
+        let listener =
+            std::net::TcpListener::bind(std::net::SocketAddr::from((Ipv4Addr::LOCALHOST, 0)))
+                .expect("listener");
+        let addr = listener.local_addr().expect("listener addr");
+        let handle = std::thread::spawn(move || {
+            let (stream, _) = listener.accept().expect("accepted");
+            let mut lines = std::io::BufReader::new(stream).lines();
+            let register = lines.next().expect("register line").expect("register line");
+            let frame = lines.next().expect("frame line").expect("frame line");
+            (register, frame)
+        });
+        let sender = TcpRelayFrameSender::new(
+            RelayConfig {
+                relay_id: "relay_1".to_string(),
+                url: format!("tcp://{addr}"),
+                region: "local".to_string(),
+            },
+            "dev_a".to_string(),
+            "node-key".to_string(),
+        );
+
+        let sent = sender
+            .send_frame(
+                "dev_b",
+                RelayMessage::Frame {
+                    source_device_id: "dev_a".to_string(),
+                    destination_device_id: "dev_b".to_string(),
+                    payload: "encrypted-frame".to_string(),
+                },
+            )
+            .expect("send frame");
+        let (register, frame) = handle.join().expect("server thread");
+        let register: RelayMessage = serde_json::from_str(&register).expect("register json");
+        let frame: RelayMessage = serde_json::from_str(&frame).expect("frame json");
+
+        assert_eq!(sent, "encrypted-frame".len());
+        assert!(matches!(
+            register,
+            RelayMessage::Register {
+                device_id,
+                node_key
+            } if device_id == "dev_a" && node_key == "node-key"
+        ));
+        assert!(matches!(
+            frame,
+            RelayMessage::Frame {
+                source_device_id,
+                destination_device_id,
+                payload
+            } if source_device_id == "dev_a"
+                && destination_device_id == "dev_b"
+                && payload == "encrypted-frame"
+        ));
     }
 
     #[tokio::test]

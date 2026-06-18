@@ -200,7 +200,8 @@ session、frame source/destination 和 nonce replay window。
 device 转发 encrypted frame、unknown destination drop/error、control 静态 relay
 metadata、network map relays 字段、agent relay map 下发到 backend、backend relay
 fallback path state、relay path 下 encrypted frame 生成和 sender 分发已实现。
-backend TCP relay transport 连接仍待实现。
+backend TCP relay transport register/send、relay frame 接收解密入口已实现。
+Phase 3 已完成。
 
 ### 目标
 
@@ -216,7 +217,7 @@ crates/tfscale-relay/
 
 - `tfscale-relay serve --listen 0.0.0.0:9443`
 - agent 建立 WebSocket 或 HTTP/2 长连接：当前先以 TCP JSON Lines 原型实现。
-- agent register relay session：relay router 已实现，agent 接入待实现。
+- agent register relay session：已实现 TCP JSON Lines register。
 - relay 根据 destination device ID 转发 encrypted frame：已实现。
 - relay 不解密 payload：已实现，payload 只作为 opaque string 转发。
 
@@ -246,9 +247,9 @@ crates/tfscale-relay/
 ### Agent/Backend
 
 - agent 从 network map 获取 relay metadata。
-- backend 建立 relay transport：待实现。
+- backend 建立 relay transport：已实现 TCP JSON Lines register/send。
 - direct path unavailable 时，data frame 走 relay：backend 已能把 encrypted frame
-  封装为 relay frame 并交给 relay sender，TCP sender 待实现。
+  封装为 relay frame 并通过 TCP relay sender 发送。
 - relay 路径不阻塞 direct probe，后台持续尝试 direct。
 
 ### 测试
@@ -256,6 +257,8 @@ crates/tfscale-relay/
 - relay session register：router 单测已覆盖。
 - relay frame route 到目标 session：已覆盖。
 - unknown destination 返回 drop/error：已覆盖。
+- backend TCP relay sender register/send：已覆盖。
+- relay frame 解密入口：已覆盖。
 - direct failure 后选择 relay。
 - direct failure 后选择 relay：path state 已覆盖。
 - direct 恢复后切回 direct。
