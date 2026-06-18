@@ -13,6 +13,7 @@ use std::{
     thread::{self, JoinHandle},
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
+use tfscale_core::protocol::RelayMessage;
 use tfscale_net::{
     BackendCapabilities, BackendCredential, BackendError, BackendStatus, BackendType, Endpoint,
     EndpointKind, LocalBackendConfig, NetworkBackend, PeerConfig, PublicEndpointProbe, RelayConfig,
@@ -292,7 +293,6 @@ struct StoredPeerSession {
     last_updated_at_unix_seconds: u64,
 }
 
-#[derive(Default)]
 struct RuntimeState {
     persisted: CustomBackendState,
     peers_by_device: HashMap<String, StoredPeerSession>,
@@ -307,6 +307,42 @@ struct RuntimeState {
     tun_device: Option<TunDevice>,
     transport: Option<TransportRuntime>,
     transport_tasks: Option<TransportTasks>,
+    relay_sender: Box<dyn RelayFrameSender>,
+}
+
+impl Default for RuntimeState {
+    fn default() -> Self {
+        Self {
+            persisted: CustomBackendState::default(),
+            peers_by_device: HashMap::new(),
+            peers_by_overlay_ip: HashMap::new(),
+            peer_crypto_material_by_device: HashMap::new(),
+            peer_udp_endpoints_by_device: HashMap::new(),
+            peer_device_by_frame_id: HashMap::new(),
+            peer_transport_sessions_by_device: HashMap::new(),
+            peer_path_state_by_device: HashMap::new(),
+            relays: Vec::new(),
+            tun_status: None,
+            tun_device: None,
+            transport: None,
+            transport_tasks: None,
+            relay_sender: Box::new(NullRelayFrameSender),
+        }
+    }
+}
+
+trait RelayFrameSender: Send + Sync {
+    fn send_frame(&self, destination_device_id: &str, message: RelayMessage) -> Result<usize>;
+}
+
+struct NullRelayFrameSender;
+
+impl RelayFrameSender for NullRelayFrameSender {
+    fn send_frame(&self, _destination_device_id: &str, _message: RelayMessage) -> Result<usize> {
+        Err(BackendError::CommandFailed(
+            "relay transport is not connected".to_string(),
+        ))
+    }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -417,6 +453,7 @@ impl RuntimeState {
             tun_device: None,
             transport: None,
             transport_tasks: None,
+            relay_sender: Box::new(NullRelayFrameSender),
         }
     }
 
@@ -431,6 +468,7 @@ impl RuntimeState {
                 ))
             })?
             .clone();
+        let relay_path = self.peer_path_is_relay(&device_id);
         let session = self
             .peer_transport_sessions_by_device
             .get_mut(&device_id)
@@ -439,12 +477,35 @@ impl RuntimeState {
                     "peer transport session is not ready: {device_id}"
                 ))
             })?;
+        let frame = session.crypto.seal(packet)?;
+        if relay_path {
+            return self.relay_sender.send_frame(
+                &device_id,
+                RelayMessage::Frame {
+                    source_device_id: self
+                        .persisted
+                        .local_config
+                        .as_ref()
+                        .map(|config| config.device_id.clone())
+                        .unwrap_or_default(),
+                    destination_device_id: device_id.clone(),
+                    payload: URL_SAFE_NO_PAD.encode(&frame),
+                },
+            );
+        }
+
         let transport = self
             .transport
             .as_mut()
             .ok_or_else(|| BackendError::CommandFailed("UDP transport is not bound".to_string()))?;
+        transport.send_frame(&session.endpoint, &frame)
+    }
 
-        transport.send_packet(&session.endpoint, &mut session.crypto, packet)
+    fn peer_path_is_relay(&self, device_id: &str) -> bool {
+        self.peer_path_state_by_device
+            .get(device_id)
+            .map(|state| state.current_path == PeerPathKind::Relay)
+            .unwrap_or(false)
     }
 
     fn probe_peer_direct_paths(&mut self) -> Result<usize> {
@@ -1544,6 +1605,71 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn sends_overlay_packet_to_relay_when_peer_path_is_relay() {
+        let state_path = temp_state_path("send-overlay-relay");
+        let backend = test_backend(&state_path);
+        let local_device_id = DeviceId::new().to_string();
+        let peer_device_id = DeviceId::new().to_string();
+        let sent_frames = Arc::new(Mutex::new(Vec::new()));
+
+        backend
+            .ensure_credentials()
+            .await
+            .expect("backend credentials");
+        backend
+            .apply_local_config(LocalBackendConfig {
+                device_id: local_device_id.clone(),
+                interface_name: "tfscale0".to_string(),
+                overlay_ip: Ipv4Addr::new(100, 64, 0, 2),
+                listen_port: 0,
+            })
+            .await
+            .expect("local config");
+        backend
+            .apply_peer_map(vec![test_peer_with_endpoint(
+                &peer_device_id,
+                Ipv4Addr::new(100, 64, 0, 3),
+                endpoint(Ipv4Addr::LOCALHOST, 51820),
+            )])
+            .await
+            .expect("peer map");
+        {
+            let mut runtime = backend.state.lock().expect("runtime");
+            runtime.relay_sender = Box::new(TestRelayFrameSender {
+                sent: Arc::clone(&sent_frames),
+            });
+            runtime.peer_path_state_by_device.insert(
+                peer_device_id.clone(),
+                PeerPathState {
+                    current_path: PeerPathKind::Relay,
+                    active_endpoint: Some(relay_endpoint(&RelayConfig {
+                        relay_id: "relay_1".to_string(),
+                        url: "tcp://127.0.0.1:9443".to_string(),
+                        region: "local".to_string(),
+                    })),
+                    ..PeerPathState::default()
+                },
+            );
+        }
+
+        let sent = backend
+            .send_overlay_packet(&ipv4_packet(
+                Ipv4Addr::new(100, 64, 0, 2),
+                Ipv4Addr::new(100, 64, 0, 3),
+            ))
+            .expect("send relay packet");
+
+        let frames = sent_frames.lock().expect("sent frames");
+        assert_eq!(frames.len(), 1);
+        assert_eq!(sent, frames[0].payload.len());
+        assert_eq!(frames[0].source_device_id, local_device_id);
+        assert_eq!(frames[0].destination_device_id, peer_device_id);
+        assert!(!frames[0].payload.is_empty());
+
+        cleanup_state(&state_path);
+    }
+
+    #[tokio::test]
     async fn receives_overlay_packet_from_peer_udp_endpoint() {
         let state_path = temp_state_path("receive-overlay-packet");
         let backend = test_backend(&state_path);
@@ -1875,6 +2001,39 @@ mod tests {
             std::thread::sleep(std::time::Duration::from_millis(10));
         }
         None
+    }
+
+    #[derive(Clone, Debug)]
+    struct SentRelayFrame {
+        source_device_id: String,
+        destination_device_id: String,
+        payload: String,
+    }
+
+    struct TestRelayFrameSender {
+        sent: Arc<Mutex<Vec<SentRelayFrame>>>,
+    }
+
+    impl RelayFrameSender for TestRelayFrameSender {
+        fn send_frame(&self, _destination_device_id: &str, message: RelayMessage) -> Result<usize> {
+            let RelayMessage::Frame {
+                source_device_id,
+                destination_device_id,
+                payload,
+            } = message
+            else {
+                return Err(BackendError::CommandFailed(
+                    "expected relay frame message".to_string(),
+                ));
+            };
+            let size = payload.len();
+            self.sent.lock().expect("sent frames").push(SentRelayFrame {
+                source_device_id,
+                destination_device_id,
+                payload,
+            });
+            Ok(size)
+        }
     }
 
     fn ipv4_packet(source: Ipv4Addr, destination: Ipv4Addr) -> Vec<u8> {
