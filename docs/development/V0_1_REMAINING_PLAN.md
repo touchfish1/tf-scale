@@ -35,10 +35,9 @@ Implemented:
 
 Known gaps:
 
-- No UDP transport or TUN packet loop.
 - No macOS TUN implementation.
-- Linux TUN still needs privileged host validation.
-- No repeatable end-to-end demo script.
+- Linux TUN still needs privileged host validation result capture.
+- macOS/Linux parity validation is not complete.
 
 ## Phase 1: Agent Polling and Runtime Loop
 
@@ -207,6 +206,10 @@ Acceptance:
 
 ## Phase 7: End-to-End Validation
 
+Status: local control/CLI smoke script, E2E validation guide, Linux validation
+script, and agent JSON status output are implemented. Linux single-host and
+two-host privileged validation results remain pending.
+
 Goal: make v0.1 reproducible for developers and reviewers.
 
 Detailed requirements and implementation steps are tracked in
@@ -232,6 +235,30 @@ Acceptance:
 - Deleting a device removes it from subsequent peer maps.
 - Directly reachable devices can ping by overlay IP.
 
+## Phase 8: macOS TUN/utun Support
+
+Goal: bring the custom backend TUN runtime to macOS and prove Linux/macOS
+parity for the v0.1 demo.
+
+Detailed requirements and implementation steps are tracked in
+[v0.1 Phase 8 macOS TUN/utun Plan](V0_1_PHASE_8_MACOS_TUN_PLAN.md).
+
+Tasks:
+
+- Add a macOS platform TUN module under `tfscale-custom`.
+- Create a utun device and report the real system-assigned interface name.
+- Configure the assigned overlay IP on the utun interface.
+- Add and clean up the `100.64.0.0/10` route on macOS.
+- Reuse the existing TUN read/write and UDP transport loops.
+- Document macOS permissions and validation commands.
+
+Acceptance:
+
+- macOS build compiles with TUN support.
+- macOS agent reports `tun_configured=true` after registration.
+- macOS status reports the actual utun interface name.
+- Linux and macOS agents can ping by overlay IP when directly reachable.
+
 ## Suggested Execution Order
 
 1. Agent polling and runtime loop.
@@ -248,5 +275,5 @@ arrives, then proves the data plane on one platform before adding the second.
 
 ## Next Immediate Task
 
-Start end-to-end validation implementation from
-[v0.1 Phase 7 End-to-End Validation Plan](V0_1_PHASE_7_E2E_VALIDATION_PLAN.md).
+Start macOS TUN implementation from
+[v0.1 Phase 8 macOS TUN/utun Plan](V0_1_PHASE_8_MACOS_TUN_PLAN.md).
