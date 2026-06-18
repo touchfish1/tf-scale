@@ -4,6 +4,8 @@
 TUN 初始化、UDP 监听、心跳上报和 transport runtime 已启动；双机流程用于验证
 Phase 6 UDP 数据面可以通过 overlay IP 互相 ping 通。
 
+完整 v0.1 验收流程见 [v0.1 端到端验收指南](E2E_VALIDATION.md)。
+
 优先使用脚本化流程：
 
 ```sh
