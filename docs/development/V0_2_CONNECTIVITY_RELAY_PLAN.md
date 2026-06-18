@@ -11,6 +11,9 @@
 4. 直连失败时自动走 DERP-like relay。
 5. relay 只转发已加密 backend packet，不能解密用户流量。
 
+开发拆分和逐阶段验收见
+[v0.2 连接穿透与 Relay 开发拆分](V0_2_CONNECTIVITY_RELAY_BREAKDOWN.md)。
+
 ## 范围
 
 包含：
@@ -307,4 +310,3 @@ RelayReady -> ProbingDirect  periodic direct retry
 - relay 不解密用户流量。
 - status 能明确展示当前 peer path。
 - 文档能指导用户复现 direct、relay、fallback 三种路径。
-

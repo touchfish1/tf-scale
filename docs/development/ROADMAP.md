@@ -32,6 +32,8 @@
 
 Detailed design:
 [v0.2 Connectivity and Relay Plan](V0_2_CONNECTIVITY_RELAY_PLAN.md).
+Development breakdown:
+[v0.2 Connectivity and Relay Breakdown](V0_2_CONNECTIVITY_RELAY_BREAKDOWN.md).
 
 - Endpoint discovery.
 - LAN endpoint reporting.
