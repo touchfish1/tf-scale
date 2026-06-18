@@ -106,7 +106,7 @@ start_relay() {
 
 make_key() {
   build_bins
-  "$TF_SCALECTL" auth-key create --control-url "$CONTROL_URL"
+  "$TF_SCALECTL" --control-url "$CONTROL_URL" auth-key create
 }
 
 run_agent() {

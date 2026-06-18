@@ -1,5 +1,6 @@
 mod dns;
 mod resolver;
+mod service;
 
 use anyhow::{Context, Result, bail};
 use clap::{Parser, Subcommand};
@@ -28,6 +29,7 @@ const DEFAULT_INTERFACE_NAME: &str = "tfscale0";
 const DEFAULT_LISTEN_PORT: u16 = 51820;
 const DEFAULT_DNS_LISTEN: &str = "127.0.0.1:1053";
 const DEFAULT_DNS_SUFFIX: &str = "mesh";
+const DIRECT_PATH_MAINTENANCE_INTERVAL: Duration = Duration::from_millis(250);
 
 #[derive(Debug, Parser)]
 #[command(name = "tfscale-agent", version, about = "tf-scale node agent")]
@@ -56,6 +58,10 @@ enum Command {
         #[command(subcommand)]
         command: DnsCommand,
     },
+    Service {
+        #[command(subcommand)]
+        command: ServiceCommand,
+    },
     Doctor {
         #[arg(long)]
         json: bool,
@@ -69,6 +75,41 @@ enum Command {
 #[derive(Debug, Subcommand)]
 enum DnsCommand {
     Plan,
+    Install,
+    Uninstall,
+    Status {
+        #[arg(long)]
+        json: bool,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+enum ServiceCommand {
+    Plan {
+        #[arg(long = "login-key")]
+        login_key: String,
+
+        #[arg(long, default_value = "http://127.0.0.1:8080")]
+        control_url: String,
+
+        #[arg(long, default_value = DEFAULT_DNS_LISTEN)]
+        dns_listen: SocketAddr,
+    },
+    Install {
+        #[arg(long = "login-key")]
+        login_key: String,
+
+        #[arg(long, default_value = "http://127.0.0.1:8080")]
+        control_url: String,
+
+        #[arg(long, default_value = DEFAULT_DNS_LISTEN)]
+        dns_listen: SocketAddr,
+    },
+    Uninstall,
+    Status {
+        #[arg(long)]
+        json: bool,
+    },
 }
 
 #[tokio::main]
@@ -91,12 +132,29 @@ async fn main() -> Result<()> {
             backend.shutdown().await?;
             println!("agent backend stopped");
         }
-        Command::Dns {
-            command: DnsCommand::Plan,
-        } => {
+        Command::Dns { command } => {
             let state = AgentState::load(&state_dir)?.unwrap_or_default();
-            print_dns_resolver_plan(&state);
+            match command {
+                DnsCommand::Plan => print_dns_resolver_plan(&state),
+                DnsCommand::Install => install_dns_resolver(&state)?,
+                DnsCommand::Uninstall => uninstall_dns_resolver(&state)?,
+                DnsCommand::Status { json } => print_dns_resolver_status(&state, json)?,
+            }
         }
+        Command::Service { command } => match command {
+            ServiceCommand::Plan {
+                login_key,
+                control_url,
+                dns_listen,
+            } => print_service_plan(&state_dir, &control_url, &login_key, dns_listen)?,
+            ServiceCommand::Install {
+                login_key,
+                control_url,
+                dns_listen,
+            } => install_service(&state_dir, &control_url, &login_key, dns_listen)?,
+            ServiceCommand::Uninstall => uninstall_service()?,
+            ServiceCommand::Status { json } => print_service_status(json)?,
+        },
         Command::Doctor { json } => {
             let backend = CustomBackend::with_state_dir(DEFAULT_INTERFACE_NAME, &state_dir);
             let status = backend.status().await?;
@@ -147,13 +205,14 @@ struct AgentStatusOutput {
     backend: BackendStatusOutput,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Serialize)]
 struct DnsStatusOutput {
     enabled: bool,
     listen: String,
     healthy: bool,
     records: usize,
     message: Option<String>,
+    resolver: resolver::ResolverStatus,
 }
 
 #[derive(Debug, Serialize)]
@@ -167,6 +226,7 @@ struct BackendStatusOutput {
 
 impl AgentStatusOutput {
     fn from_state_and_status(state: AgentState, status: tfscale_net::BackendStatus) -> Self {
+        let resolver_status = resolver::status(&dns_resolver_plan(&state));
         let dns_records = state.dns_records;
         let dns_record_count = dns_records.len();
         Self {
@@ -176,10 +236,11 @@ impl AgentStatusOutput {
             dns_records,
             dns: DnsStatusOutput {
                 enabled: state.dns_enabled,
-                listen: state.dns_listen,
+                listen: state.dns_listen.clone(),
                 healthy: state.dns_healthy,
                 records: dns_record_count,
                 message: state.dns_message,
+                resolver: resolver_status,
             },
             backend_public_credential_present: !state.backend_public_credential.is_empty(),
             backend: BackendStatusOutput {
@@ -235,7 +296,7 @@ impl AgentDoctorReport {
         checks.push(check_backend_peers(status));
         checks.push(check_dns_listener(state));
         checks.push(check_dns_snapshot(state));
-        checks.push(check_dns_resolver_plan(state));
+        checks.push(check_dns_system_resolver(state));
 
         let overall = overall_level(&checks);
         let next_steps = next_steps(&checks);
@@ -383,23 +444,44 @@ fn check_dns_snapshot(state: &AgentState) -> DoctorCheck {
     }
 }
 
-fn check_dns_resolver_plan(state: &AgentState) -> DoctorCheck {
-    let (nameserver, port) = dns_listen_parts(&state.dns_listen);
-    let config = resolver::ResolverConfig {
-        suffix: DEFAULT_DNS_SUFFIX.to_string(),
-        nameserver,
-        port,
-    };
-    let plan = resolver::current_platform_plan(&config);
+fn check_dns_system_resolver(state: &AgentState) -> DoctorCheck {
+    let plan = dns_resolver_plan(state);
+    let status = resolver::status(&plan);
 
-    DoctorCheck {
-        id: "dns.resolver_plan".to_string(),
-        level: DoctorLevel::Warn,
-        summary: format!("not installed; planned path={}", plan.config_path.display()),
-        detail: Some(format!("platform={:?}", plan.platform)),
-        suggestion: Some(
-            "run tfscale-agent dns plan; install support is the next phase".to_string(),
-        ),
+    if status.installed && status.content_matches {
+        DoctorCheck {
+            id: "dns.system_resolver".to_string(),
+            level: DoctorLevel::Ok,
+            summary: format!("installed path={}", status.config_path.display()),
+            detail: Some(format!("platform={}", status.platform)),
+            suggestion: None,
+        }
+    } else if status.installed {
+        DoctorCheck {
+            id: "dns.system_resolver".to_string(),
+            level: DoctorLevel::Warn,
+            summary: format!(
+                "installed but content differs path={}",
+                status.config_path.display()
+            ),
+            detail: status.message,
+            suggestion: Some(
+                "run tfscale-agent dns install to refresh resolver config".to_string(),
+            ),
+        }
+    } else {
+        DoctorCheck {
+            id: "dns.system_resolver".to_string(),
+            level: DoctorLevel::Warn,
+            summary: format!(
+                "not installed; planned path={}",
+                status.config_path.display()
+            ),
+            detail: Some(format!("platform={}", status.platform)),
+            suggestion: Some(
+                "run tfscale-agent dns install to enable system hostname resolution".to_string(),
+            ),
+        }
     }
 }
 
@@ -452,15 +534,9 @@ fn init_tracing() {
 }
 
 fn print_dns_resolver_plan(state: &AgentState) {
-    let (nameserver, port) = dns_listen_parts(&state.dns_listen);
-    let config = resolver::ResolverConfig {
-        suffix: DEFAULT_DNS_SUFFIX.to_string(),
-        nameserver,
-        port,
-    };
-    let plan = resolver::current_platform_plan(&config);
+    let plan = dns_resolver_plan(state);
 
-    println!("platform={:?}", plan.platform);
+    println!("platform={}", resolver::platform_label(&plan.platform));
     println!("config_path={}", plan.config_path.display());
     println!("install_content:");
     print!("{}", plan.install_content);
@@ -476,6 +552,169 @@ fn print_dns_resolver_plan(state: &AgentState) {
             println!("{}", path.display());
         }
     }
+}
+
+fn install_dns_resolver(state: &AgentState) -> Result<()> {
+    let plan = dns_resolver_plan(state);
+    resolver::install(&plan)?;
+    println!(
+        "DNS resolver installed: platform={} config_path={}",
+        resolver::platform_label(&plan.platform),
+        plan.config_path.display()
+    );
+    Ok(())
+}
+
+fn uninstall_dns_resolver(state: &AgentState) -> Result<()> {
+    let plan = dns_resolver_plan(state);
+    resolver::uninstall(&plan)?;
+    println!(
+        "DNS resolver uninstalled: platform={} config_path={}",
+        resolver::platform_label(&plan.platform),
+        plan.config_path.display()
+    );
+    Ok(())
+}
+
+fn print_dns_resolver_status(state: &AgentState, json: bool) -> Result<()> {
+    let plan = dns_resolver_plan(state);
+    let status = resolver::status(&plan);
+    if json {
+        println!("{}", serde_json::to_string_pretty(&status)?);
+    } else {
+        println!(
+            "platform={} installed={} content_matches={} config_path={} message={}",
+            status.platform,
+            status.installed,
+            status.content_matches,
+            status.config_path.display(),
+            status.message.unwrap_or_default()
+        );
+    }
+    Ok(())
+}
+
+fn print_service_plan(
+    state_dir: &PathBuf,
+    control_url: &str,
+    login_key: &str,
+    dns_listen: SocketAddr,
+) -> Result<()> {
+    let plan = service_plan(state_dir, control_url, login_key, dns_listen)?;
+    println!("platform={}", service::platform_label(&plan.platform));
+    println!("unit_path={}", plan.unit_path.display());
+    println!("unit_content:");
+    print!("{}", plan.unit_content);
+    if !plan.install_commands.is_empty() {
+        println!("install_commands:");
+        for command in plan.install_commands {
+            println!("{}", command.join(" "));
+        }
+    }
+    if !plan.uninstall_commands.is_empty() {
+        println!("uninstall_commands:");
+        for command in plan.uninstall_commands {
+            println!("{}", command.join(" "));
+        }
+    }
+    Ok(())
+}
+
+fn install_service(
+    state_dir: &PathBuf,
+    control_url: &str,
+    login_key: &str,
+    dns_listen: SocketAddr,
+) -> Result<()> {
+    let plan = service_plan(state_dir, control_url, login_key, dns_listen)?;
+    service::install(&plan)?;
+    println!(
+        "agent service installed: platform={} unit_path={}",
+        service::platform_label(&plan.platform),
+        plan.unit_path.display()
+    );
+    Ok(())
+}
+
+fn uninstall_service() -> Result<()> {
+    let plan = service::current_platform_plan(&service::ServiceConfig {
+        binary_path: current_exe()?,
+        state_dir: default_state_dir(),
+        control_url: "http://127.0.0.1:8080".to_string(),
+        login_key: "unused".to_string(),
+        dns_listen: DEFAULT_DNS_LISTEN.parse()?,
+    });
+    service::uninstall(&plan)?;
+    println!(
+        "agent service uninstalled: platform={} unit_path={}",
+        service::platform_label(&plan.platform),
+        plan.unit_path.display()
+    );
+    Ok(())
+}
+
+fn print_service_status(json: bool) -> Result<()> {
+    let plan = service::current_platform_plan(&service::ServiceConfig {
+        binary_path: current_exe()?,
+        state_dir: default_state_dir(),
+        control_url: "http://127.0.0.1:8080".to_string(),
+        login_key: "unused".to_string(),
+        dns_listen: DEFAULT_DNS_LISTEN.parse()?,
+    });
+    let status = service::status(&plan);
+    if json {
+        println!("{}", serde_json::to_string_pretty(&status)?);
+    } else {
+        println!(
+            "platform={} installed={} env_installed={} enabled={} active={} unit_path={} env_path={} message={}",
+            status.platform,
+            status.installed,
+            status.env_installed,
+            optional_bool_label(status.enabled),
+            optional_bool_label(status.active),
+            status.unit_path.display(),
+            status.env_path.display(),
+            status.message.unwrap_or_default()
+        );
+    }
+    Ok(())
+}
+
+fn service_plan(
+    state_dir: &PathBuf,
+    control_url: &str,
+    login_key: &str,
+    dns_listen: SocketAddr,
+) -> Result<service::ServicePlan> {
+    Ok(service::current_platform_plan(&service::ServiceConfig {
+        binary_path: current_exe()?,
+        state_dir: state_dir.clone(),
+        control_url: control_url.to_string(),
+        login_key: login_key.to_string(),
+        dns_listen,
+    }))
+}
+
+fn current_exe() -> Result<PathBuf> {
+    std::env::current_exe().context("failed to find current executable path")
+}
+
+fn optional_bool_label(value: Option<bool>) -> &'static str {
+    match value {
+        Some(true) => "true",
+        Some(false) => "false",
+        None => "unknown",
+    }
+}
+
+fn dns_resolver_plan(state: &AgentState) -> resolver::ResolverPlan {
+    let (nameserver, port) = dns_listen_parts(&state.dns_listen);
+    let config = resolver::ResolverConfig {
+        suffix: DEFAULT_DNS_SUFFIX.to_string(),
+        nameserver,
+        port,
+    };
+    resolver::current_platform_plan(&config)
 }
 
 fn dns_listen_parts(value: &str) -> (String, u16) {
@@ -618,7 +857,9 @@ async fn run_agent_loop(
     state: &AgentState,
     last_applied_network_map_version: &mut Option<i64>,
 ) -> Result<()> {
-    let interval = Duration::from_secs(state.poll_interval_seconds.max(1));
+    let mut sync_interval =
+        tokio::time::interval(Duration::from_secs(state.poll_interval_seconds.max(1)));
+    let mut path_maintenance_interval = tokio::time::interval(DIRECT_PATH_MAINTENANCE_INTERVAL);
 
     loop {
         tokio::select! {
@@ -628,7 +869,7 @@ async fn run_agent_loop(
                 backend.shutdown().await?;
                 break;
             }
-            _ = tokio::time::sleep(interval) => {
+            _ = sync_interval.tick() => {
                 if let Err(error) = sync_agent_once(
                     client,
                     backend,
@@ -641,6 +882,11 @@ async fn run_agent_loop(
                 .await
                 {
                     warn!(%error, "agent sync failed");
+                }
+            }
+            _ = path_maintenance_interval.tick() => {
+                if let Err(error) = backend.maintain_peer_paths().await {
+                    warn!(%error, "peer path maintenance failed");
                 }
             }
         }

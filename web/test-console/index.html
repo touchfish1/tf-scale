@@ -1,0 +1,125 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>tf-scale 测试控制台</title>
+    <link rel="stylesheet" href="./styles.css" />
+  </head>
+  <body>
+    <header class="app-header">
+      <div>
+        <h1>tf-scale 测试控制台</h1>
+        <p>P2P direct、overlay ping、MagicDNS 和服务安装的跨平台测试工作台。</p>
+      </div>
+      <div class="status-pill" id="overallStatus">未开始</div>
+    </header>
+
+    <main class="layout">
+      <section class="panel setup-panel">
+        <div class="section-title">
+          <h2>测试参数</h2>
+          <button id="resetBtn" type="button">重置</button>
+        </div>
+        <label>
+          Control IP
+          <input id="controlIp" value="192.168.1.10" autocomplete="off" />
+        </label>
+        <label>
+          Control URL
+          <input id="controlUrl" value="http://192.168.1.10:8080" autocomplete="off" />
+        </label>
+        <label>
+          Relay URL
+          <input id="relayUrl" value="tcp://192.168.1.10:9443" autocomplete="off" />
+        </label>
+        <label>
+          仓库路径
+          <input id="repoPath" value="/opt/tf-sacle" autocomplete="off" />
+        </label>
+      </section>
+
+      <section class="panel">
+        <div class="section-title">
+          <h2>平台支持</h2>
+        </div>
+        <div class="platform-grid">
+          <button class="platform active" data-platform="linux" type="button">
+            <span>Linux</span>
+            <small>当前主测试平台</small>
+          </button>
+          <button class="platform" data-platform="macos" type="button">
+            <span>macOS</span>
+            <small>utun 待实机验证</small>
+          </button>
+          <button class="platform" data-platform="windows" type="button">
+            <span>Windows</span>
+            <small>GUI/控制面先行</small>
+          </button>
+        </div>
+        <div class="platform-note" id="platformNote"></div>
+      </section>
+
+      <section class="panel command-panel">
+        <div class="section-title">
+          <h2>命令生成</h2>
+          <button id="copyCommandBtn" type="button">复制当前命令</button>
+        </div>
+        <div class="command-tabs">
+          <button class="tab active" data-command="control" type="button">Control</button>
+          <button class="tab" data-command="agentA" type="button">Agent A</button>
+          <button class="tab" data-command="agentB" type="button">Agent B</button>
+          <button class="tab" data-command="status" type="button">Status</button>
+          <button class="tab" data-command="ping" type="button">Ping</button>
+          <button class="tab" data-command="dns" type="button">MagicDNS</button>
+        </div>
+        <pre id="commandOutput"></pre>
+      </section>
+
+      <section class="panel clients-panel">
+        <div class="section-title">
+          <h2>客户端记录</h2>
+        </div>
+        <div class="client-grid">
+          <article class="client" data-client="a">
+            <h3>Agent A</h3>
+            <label>登录 key<input id="keyA" placeholder="tfk_..." /></label>
+            <label>Overlay IP<input id="ipA" placeholder="100.64.0.2" /></label>
+            <label>Hostname<input id="hostA" placeholder="dev-a" /></label>
+            <div class="client-state" id="stateA">未连接</div>
+          </article>
+          <article class="client" data-client="b">
+            <h3>Agent B</h3>
+            <label>登录 key<input id="keyB" placeholder="tfk_..." /></label>
+            <label>Overlay IP<input id="ipB" placeholder="100.64.0.3" /></label>
+            <label>Hostname<input id="hostB" placeholder="dev-b" /></label>
+            <div class="client-state" id="stateB">未连接</div>
+          </article>
+        </div>
+      </section>
+
+      <section class="panel diagnostics-panel">
+        <div class="section-title">
+          <h2>状态解析</h2>
+          <button id="parseStatusBtn" type="button">解析 JSON</button>
+        </div>
+        <textarea id="statusInput" spellcheck="false" placeholder="把 tfscale-agent status --json 输出粘贴到这里"></textarea>
+        <div class="diagnostics" id="diagnostics"></div>
+      </section>
+
+      <section class="panel checklist-panel">
+        <div class="section-title">
+          <h2>验收清单</h2>
+        </div>
+        <label class="check"><input type="checkbox" data-check /> Control 健康</label>
+        <label class="check"><input type="checkbox" data-check /> 两台 agent 已注册</label>
+        <label class="check"><input type="checkbox" data-check /> 两台 agent 获得 100.64.0.x</label>
+        <label class="check"><input type="checkbox" data-check /> peer path 为 direct</label>
+        <label class="check"><input type="checkbox" data-check /> overlay IP ping 通</label>
+        <label class="check"><input type="checkbox" data-check /> MagicDNS 可解析</label>
+      </section>
+    </main>
+
+    <script src="./app.js"></script>
+  </body>
+</html>

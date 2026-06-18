@@ -43,6 +43,8 @@ const STATE_VERSION: u32 = 1;
 const IDENTITY_SCHEME: &str = "x25519";
 const PUBLIC_CREDENTIAL_PREFIX: &str = "tfpk1_";
 const DIRECT_PROBE_INTERVAL: Duration = Duration::from_secs(5);
+const DIRECT_FAST_PROBE_INTERVAL: Duration = Duration::from_millis(250);
+const DIRECT_FAST_PROBE_BURST_ATTEMPTS: u8 = 8;
 const DIRECT_PROBE_STALE_AFTER: Duration = Duration::from_secs(15);
 const DIRECT_PROBE_FAILURE_THRESHOLD: u32 = 3;
 
@@ -450,6 +452,7 @@ struct PeerPathState {
     last_probe_at: Option<SystemTime>,
     last_success_at: Option<SystemTime>,
     last_probe_sent_at_unix_millis: Option<u128>,
+    fast_probe_attempts_remaining: u8,
     failures: u32,
     rtt_ms: Option<u64>,
 }
@@ -462,6 +465,7 @@ impl Default for PeerPathState {
             last_probe_at: None,
             last_success_at: None,
             last_probe_sent_at_unix_millis: None,
+            fast_probe_attempts_remaining: DIRECT_FAST_PROBE_BURST_ATTEMPTS,
             failures: 0,
             rtt_ms: None,
         }
@@ -615,6 +619,9 @@ impl RuntimeState {
             }
             path_state.last_probe_at = Some(SystemTime::now());
             path_state.last_probe_sent_at_unix_millis = Some(sent_at);
+            if path_state.fast_probe_attempts_remaining > 0 {
+                path_state.fast_probe_attempts_remaining -= 1;
+            }
             if path_state.current_path != PeerPathKind::Direct {
                 path_state.failures = path_state.failures.saturating_add(1);
             }
@@ -746,6 +753,7 @@ impl RuntimeState {
         state.last_success_at = Some(SystemTime::now());
         state.failures = 0;
         state.rtt_ms = rtt_ms;
+        state.fast_probe_attempts_remaining = 0;
 
         if let Some(session) = self.peer_transport_sessions_by_device.get_mut(device_id) {
             session.endpoint = endpoint;
@@ -775,6 +783,7 @@ impl RuntimeState {
                     state.active_endpoint = Some(relay_endpoint(&self.relays[0]));
                 }
                 state.rtt_ms = None;
+                state.fast_probe_attempts_remaining = DIRECT_FAST_PROBE_BURST_ATTEMPTS;
             }
         }
     }
@@ -994,10 +1003,17 @@ fn build_peer_transport_sessions(
 }
 
 fn peer_path_probe_due(state: &PeerPathState, now: SystemTime) -> bool {
+    let interval =
+        if state.current_path != PeerPathKind::Direct && state.fast_probe_attempts_remaining > 0 {
+            DIRECT_FAST_PROBE_INTERVAL
+        } else {
+            DIRECT_PROBE_INTERVAL
+        };
+
     state
         .last_probe_at
         .and_then(|last_probe| now.duration_since(last_probe).ok())
-        .map(|elapsed| elapsed >= DIRECT_PROBE_INTERVAL)
+        .map(|elapsed| elapsed >= interval)
         .unwrap_or(true)
 }
 
@@ -1044,6 +1060,16 @@ fn direct_path_status(peer_paths: &HashMap<String, PeerPathState>) -> String {
     } else {
         paths.join(",")
     }
+}
+
+fn fast_probe_status(peer_paths: &HashMap<String, PeerPathState>) -> String {
+    let count = peer_paths
+        .values()
+        .filter(|state| {
+            state.current_path != PeerPathKind::Direct && state.fast_probe_attempts_remaining > 0
+        })
+        .count();
+    count.to_string()
 }
 
 fn peer_path_diagnostics(
@@ -1409,6 +1435,7 @@ impl NetworkBackend for CustomBackend {
             .filter(|state| state.current_path == PeerPathKind::Relay)
             .count();
         let direct_paths = direct_path_status(&peer_path_state_by_device);
+        let fast_probe_peers = fast_probe_status(&peer_path_state_by_device);
         let reachable_peers = direct_peers + relay_peers;
         Ok(BackendStatus {
             backend_type: self.backend_type(),
@@ -1418,7 +1445,7 @@ impl NetworkBackend for CustomBackend {
                 && transport_status.udp_bound
                 && transport_running,
             message: Some(format!(
-                "custom backend state: credentials={} local_config={} peers={} peer_indexes=device:{} overlay:{} crypto_peers={} udp_bound={} transport_running={} local_endpoints={} transport_peers={} transport_sessions={} direct_peers={} relay_peers={} direct_paths={} reachable_peers={} tx_packets={} rx_packets={} tx_drops={} rx_drops={} tun_configured={} tun_io_ready={} tun_message={} data_plane=transport_ready",
+                "custom backend state: credentials={} local_config={} peers={} peer_indexes=device:{} overlay:{} crypto_peers={} udp_bound={} transport_running={} local_endpoints={} transport_peers={} transport_sessions={} direct_peers={} relay_peers={} fast_probe_peers={} direct_paths={} reachable_peers={} tx_packets={} rx_packets={} tx_drops={} rx_drops={} tun_configured={} tun_io_ready={} tun_message={} data_plane=transport_ready",
                 has_credentials,
                 has_local_config,
                 runtime.persisted.peers.len(),
@@ -1432,6 +1459,7 @@ impl NetworkBackend for CustomBackend {
                 transport_sessions,
                 direct_peers,
                 relay_peers,
+                fast_probe_peers,
                 direct_paths,
                 reachable_peers,
                 transport_status.tx_packets,
@@ -2184,12 +2212,89 @@ mod tests {
         cleanup_state(&right_state_path);
     }
 
+    #[tokio::test]
+    async fn direct_probe_consumes_fast_probe_attempt() {
+        let state_path = temp_state_path("direct-fast-probe-consume");
+        let backend = test_backend(&state_path);
+        let local_device_id = DeviceId::new().to_string();
+        let peer_device_id = DeviceId::new().to_string();
+        let peer_identity = generate_identity();
+
+        let local_credential = backend
+            .ensure_credentials()
+            .await
+            .expect("backend credentials");
+        backend
+            .apply_local_config(LocalBackendConfig {
+                device_id: local_device_id,
+                interface_name: "tfscale0".to_string(),
+                overlay_ip: Ipv4Addr::new(100, 64, 0, 2),
+                listen_port: 0,
+            })
+            .await
+            .expect("local config");
+        backend
+            .apply_peer_map(vec![PeerConfig {
+                public_credential: BackendCredential {
+                    public: peer_identity.public_key,
+                },
+                ..test_peer_with_endpoint(
+                    &peer_device_id,
+                    Ipv4Addr::new(100, 64, 0, 3),
+                    endpoint(Ipv4Addr::LOCALHOST, 51820),
+                )
+            }])
+            .await
+            .expect("peer map");
+
+        assert_eq!(backend.probe_peer_direct_paths().expect("probe"), 1);
+        let runtime = backend.state.lock().expect("runtime");
+        let state = runtime
+            .peer_path_state_by_device
+            .get(&peer_device_id)
+            .expect("peer path");
+        assert_eq!(
+            state.fast_probe_attempts_remaining,
+            DIRECT_FAST_PROBE_BURST_ATTEMPTS - 1
+        );
+        assert_eq!(state.failures, 1);
+
+        drop(runtime);
+        let _ = local_credential;
+        cleanup_state(&state_path);
+    }
+
     #[test]
     fn probe_interval_limits_repeated_direct_probes() {
         let mut state = PeerPathState::default();
 
         assert!(peer_path_probe_due(&state, SystemTime::now()));
         state.last_probe_at = Some(SystemTime::now());
+
+        assert!(!peer_path_probe_due(&state, SystemTime::now()));
+    }
+
+    #[test]
+    fn fast_probe_window_uses_short_interval_for_unknown_paths() {
+        let mut state = PeerPathState {
+            last_probe_at: Some(SystemTime::now() - DIRECT_FAST_PROBE_INTERVAL),
+            ..PeerPathState::default()
+        };
+
+        assert!(peer_path_probe_due(&state, SystemTime::now()));
+
+        state.fast_probe_attempts_remaining = 0;
+        assert!(!peer_path_probe_due(&state, SystemTime::now()));
+    }
+
+    #[test]
+    fn direct_paths_do_not_use_fast_probe_window() {
+        let state = PeerPathState {
+            current_path: PeerPathKind::Direct,
+            last_probe_at: Some(SystemTime::now() - DIRECT_FAST_PROBE_INTERVAL),
+            fast_probe_attempts_remaining: DIRECT_FAST_PROBE_BURST_ATTEMPTS,
+            ..PeerPathState::default()
+        };
 
         assert!(!peer_path_probe_due(&state, SystemTime::now()));
     }

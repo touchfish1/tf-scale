@@ -1,7 +1,7 @@
 # MagicDNS 本地代理验证指南
 
-本文档验证 v0.3 Phase 3A：agent 内置本地 DNS server。当前阶段不会修改系统
-resolver，因此验证命令使用显式 DNS server：
+本文档验证 v0.3 Phase 3A/4：agent 内置本地 DNS server，并可显式安装系统
+resolver。安装 resolver 前，可以用显式 DNS server 验证：
 
 ```sh
 dig @127.0.0.1 -p 1053 devbox.mesh A
@@ -40,12 +40,33 @@ sudo scripts/magicdns-local-check.sh agent --login-key "$key"
 scripts/magicdns-local-check.sh records
 scripts/magicdns-local-check.sh status
 scripts/magicdns-local-check.sh doctor
+scripts/magicdns-local-check.sh dns-status
 ```
 
-找到 records 中的 `name` 和 `value` 后验证：
+验证第一条 DNS 记录：
+
+```sh
+scripts/magicdns-local-check.sh resolve-first
+```
+
+也可以手动指定 records 中的 `name` 和 `value`：
 
 ```sh
 scripts/magicdns-local-check.sh resolve --name <hostname>.mesh --expect <100.64.0.x>
+```
+
+安装系统 resolver 后验证直接访问主机名，推荐使用完整 smoke：
+
+```sh
+sudo scripts/magicdns-local-check.sh system-resolver-smoke
+```
+
+也可以拆开执行：
+
+```sh
+sudo scripts/magicdns-local-check.sh install-dns
+scripts/magicdns-local-check.sh ping-name --name <hostname>.mesh
+sudo scripts/magicdns-local-check.sh uninstall-dns
 ```
 
 清理：
@@ -112,7 +133,36 @@ scripts/magicdns-local-check.sh doctor
 - `backend.healthy`
 - `dns.listener`
 - `dns.snapshot`
-- `dns.resolver_plan`
+- `dns.system_resolver`
+
+## 系统 Resolver 验证
+
+查看当前系统 resolver 接入状态：
+
+```sh
+target/debug/tfscale-agent --state-dir ./state dns status
+target/debug/tfscale-agent --state-dir ./state dns status --json
+```
+
+安装和清理系统 resolver：
+
+```sh
+sudo target/debug/tfscale-agent --state-dir ./state dns install
+ping -c 3 devbox.mesh
+sudo target/debug/tfscale-agent --state-dir ./state dns uninstall
+```
+
+Linux 当前使用 systemd-resolved drop-in：
+
+```text
+/etc/systemd/resolved.conf.d/tfscale-magicdns.conf
+```
+
+macOS 当前使用 resolver 专用文件：
+
+```text
+/etc/resolver/mesh
+```
 
 ## Rename/Delete 验证
 
@@ -139,6 +189,6 @@ dig @127.0.0.1 -p 1053 oldname.mesh A
 
 ## 当前限制
 
-- 还不能直接 `ping devbox.mesh`，因为系统 resolver 尚未接入本地 DNS server。
+- Linux 的 `systemd-resolved` 是否接受 `DNS=127.0.0.1:1053` 仍需实机验证。
 - 本阶段只支持 UDP DNS 和 `A` record。
 - 非 `*.mesh` 查询不会转发到上游 DNS。

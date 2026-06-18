@@ -208,11 +208,26 @@ pub(crate) fn sorted_udp_endpoints(endpoints: &[Endpoint]) -> Vec<Endpoint> {
 
 fn endpoint_rank(endpoint: &Endpoint) -> u8 {
     match endpoint.kind {
-        EndpointKind::Lan => 0,
+        EndpointKind::Lan if is_private_lan(endpoint.address) => 0,
         EndpointKind::Ipv6 => 1,
         EndpointKind::Public => 2,
-        EndpointKind::Relay => 3,
+        EndpointKind::Lan => 3,
+        EndpointKind::Relay => 4,
     }
+}
+
+fn is_private_lan(address: IpAddr) -> bool {
+    match address {
+        IpAddr::V4(address) => {
+            address.is_private() || address.is_link_local() || is_cgnat_ipv4(address)
+        }
+        IpAddr::V6(address) => address.is_unique_local() || address.is_unicast_link_local(),
+    }
+}
+
+fn is_cgnat_ipv4(address: Ipv4Addr) -> bool {
+    let octets = address.octets();
+    octets[0] == 100 && (64..=127).contains(&octets[1])
 }
 
 fn endpoint_socket_addr(endpoint: &Endpoint) -> Result<SocketAddr> {
@@ -329,6 +344,27 @@ mod tests {
         assert_eq!(endpoints[0].kind, EndpointKind::Lan);
         assert_eq!(endpoints[1].kind, EndpointKind::Public);
         assert_eq!(endpoints[2].kind, EndpointKind::Relay);
+    }
+
+    #[test]
+    fn ranks_public_before_loopback_lan_endpoint() {
+        let endpoints = sorted_udp_endpoints(&[
+            Endpoint {
+                kind: EndpointKind::Lan,
+                address: IpAddr::V4(Ipv4Addr::LOCALHOST),
+                port: 51820,
+                protocol: TransportProtocol::Udp,
+            },
+            Endpoint {
+                kind: EndpointKind::Public,
+                address: "203.0.113.10".parse().expect("public address"),
+                port: 51820,
+                protocol: TransportProtocol::Udp,
+            },
+        ]);
+
+        assert_eq!(endpoints[0].kind, EndpointKind::Public);
+        assert_eq!(endpoints[1].kind, EndpointKind::Lan);
     }
 
     #[test]

@@ -1,0 +1,252 @@
+:root {
+  color-scheme: dark;
+  --bg: #0f1220;
+  --panel: #171b2d;
+  --panel-2: #1d2238;
+  --border: #2b3352;
+  --text: #eef1ff;
+  --muted: #aab2d6;
+  --accent: #67d4ff;
+  --good: #4cd4a6;
+  --warn: #f4c152;
+  --bad: #f76c6c;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  font: 14px/1.5 system-ui, -apple-system, Segoe UI, sans-serif;
+  background: linear-gradient(180deg, #0d1020 0%, #11152a 100%);
+  color: var(--text);
+}
+
+button,
+input,
+textarea {
+  font: inherit;
+}
+
+button {
+  border: 1px solid var(--border);
+  background: var(--panel-2);
+  color: var(--text);
+  padding: 0.65rem 0.9rem;
+  border-radius: 8px;
+  cursor: pointer;
+}
+
+button.active,
+button:hover {
+  border-color: var(--accent);
+}
+
+input,
+textarea,
+pre {
+  width: 100%;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: #0e1324;
+  color: var(--text);
+}
+
+input,
+textarea {
+  padding: 0.75rem;
+}
+
+textarea {
+  min-height: 220px;
+  resize: vertical;
+}
+
+pre {
+  margin: 0;
+  padding: 1rem;
+  overflow: auto;
+  min-height: 180px;
+}
+
+.app-header,
+.layout {
+  width: min(1280px, calc(100vw - 32px));
+  margin: 0 auto;
+}
+
+.app-header {
+  display: flex;
+  justify-content: space-between;
+  gap: 1rem;
+  align-items: start;
+  padding: 24px 0 12px;
+}
+
+.app-header h1 {
+  margin: 0 0 0.25rem;
+  font-size: 24px;
+}
+
+.app-header p,
+.platform-note,
+.client-state,
+.diagnostics {
+  color: var(--muted);
+}
+
+.status-pill {
+  align-self: center;
+  padding: 0.45rem 0.8rem;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  background: rgba(103, 212, 255, 0.08);
+}
+
+.layout {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 16px;
+  padding-bottom: 24px;
+}
+
+.panel {
+  background: rgba(23, 27, 45, 0.96);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 16px;
+}
+
+.setup-panel,
+.command-panel,
+.diagnostics-panel {
+  grid-column: span 2;
+}
+
+.section-title {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 1rem;
+  margin-bottom: 12px;
+}
+
+.section-title h2,
+.client h3 {
+  margin: 0;
+  font-size: 16px;
+}
+
+.setup-panel,
+.checklist-panel {
+  display: grid;
+  gap: 12px;
+}
+
+.platform-grid,
+.command-tabs,
+.client-grid {
+  display: grid;
+  gap: 12px;
+}
+
+.platform-grid {
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+}
+
+.platform,
+.tab,
+.check {
+  text-align: left;
+}
+
+.platform {
+  display: grid;
+  gap: 0.2rem;
+}
+
+.platform small {
+  color: var(--muted);
+}
+
+.platform-note {
+  min-height: 1.4rem;
+}
+
+.command-tabs {
+  grid-template-columns: repeat(6, minmax(0, 1fr));
+}
+
+.client-grid {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
+.client {
+  background: #11162a;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 14px;
+  display: grid;
+  gap: 10px;
+}
+
+.client label,
+.setup-panel label {
+  display: grid;
+  gap: 6px;
+}
+
+.client-state {
+  min-height: 1.4rem;
+}
+
+.diagnostics {
+  display: grid;
+  gap: 8px;
+  margin-top: 12px;
+}
+
+.diagnostics .line {
+  display: grid;
+  grid-template-columns: 160px 1fr;
+  gap: 10px;
+  align-items: start;
+}
+
+.diagnostics code,
+.chip {
+  padding: 0.12rem 0.35rem;
+  border-radius: 6px;
+  background: rgba(103, 212, 255, 0.12);
+}
+
+.check {
+  display: flex;
+  gap: 10px;
+  align-items: center;
+}
+
+@media (max-width: 960px) {
+  .layout,
+  .app-header {
+    width: min(100vw - 20px, 1280px);
+  }
+
+  .layout,
+  .client-grid,
+  .platform-grid,
+  .command-tabs {
+    grid-template-columns: 1fr;
+  }
+
+  .setup-panel,
+  .command-panel,
+  .diagnostics-panel {
+    grid-column: span 1;
+  }
+
+  .diagnostics .line {
+    grid-template-columns: 1fr;
+  }
+}

@@ -26,8 +26,15 @@ Usage:
   $0 agent --login-key <key> [--dns-listen <addr:port>]
   $0 status
   $0 doctor
+  $0 dns-status
+  sudo $0 install-dns
+  sudo $0 uninstall-dns
   $0 records
   $0 resolve --name <hostname.mesh> [--expect <100.64.0.x>]
+  $0 resolve-first
+  $0 ping-name --name <hostname.mesh> [--count 3]
+  sudo $0 system-resolver-smoke
+  sudo $0 service-smoke --login-key <key>
   $0 cleanup
 
 Typical flow:
@@ -35,7 +42,9 @@ Typical flow:
   key="$($0 make-key | tail -n 1)"
   sudo $0 agent --login-key "$key"
   $0 records
-  $0 resolve --name <hostname>.mesh
+  $0 resolve-first
+  sudo $0 system-resolver-smoke
+  sudo $0 service-smoke --login-key "$key"
 EOF
 }
 
@@ -147,8 +156,32 @@ doctor() {
   TFSCALE_STATE_DIR="$STATE_DIR" "$TF_SCALE_AGENT" doctor
 }
 
+dns_status() {
+  TFSCALE_STATE_DIR="$STATE_DIR" "$TF_SCALE_AGENT" dns status
+}
+
+install_dns() {
+  [ "$(id -u)" -eq 0 ] || fail "install-dns must run as root because it writes system resolver config"
+  TFSCALE_STATE_DIR="$STATE_DIR" "$TF_SCALE_AGENT" dns install
+  dns_status
+}
+
+uninstall_dns() {
+  [ "$(id -u)" -eq 0 ] || fail "uninstall-dns must run as root because it removes system resolver config"
+  TFSCALE_STATE_DIR="$STATE_DIR" "$TF_SCALE_AGENT" dns uninstall
+  dns_status
+}
+
 records() {
   "$TF_SCALECTL" --control-url "$CONTROL_URL" dns records
+}
+
+first_record() {
+  local record
+  record="$("$TF_SCALECTL" --control-url "$CONTROL_URL" dns records |
+    awk 'NR == 2 { print $2 " " $4 }')"
+  [ -n "$record" ] || fail "no DNS records found; wait for agent sync and run records"
+  printf '%s\n' "$record"
 }
 
 resolve_name() {
@@ -175,7 +208,77 @@ resolve_name() {
   fi
 }
 
+resolve_first() {
+  local name expected
+  read -r name expected < <(first_record)
+  log "resolving first DNS record: $name -> $expected"
+  resolve_name --name "$name" --expect "$expected"
+}
+
+ping_name() {
+  local name=""
+  local count="3"
+  while [ "$#" -gt 0 ]; do
+    case "$1" in
+      --name) name="${2:-}"; shift 2 ;;
+      --count) count="${2:-}"; shift 2 ;;
+      *) fail "unknown ping-name argument: $1" ;;
+    esac
+  done
+  [ -n "$name" ] || fail "missing --name"
+
+  ping -c "$count" "$name" || {
+    printf 'hint: run "%s doctor" and "%s dns-status" for resolver diagnostics\n' "$0" "$0" >&2
+    fail "ping failed for $name"
+  }
+}
+
+system_resolver_smoke() {
+  [ "$(id -u)" -eq 0 ] || fail "system-resolver-smoke must run as root because it installs system resolver config"
+  local name expected
+  read -r name expected < <(first_record)
+
+  resolve_name --name "$name" --expect "$expected"
+  install_dns
+  trap 'TFSCALE_STATE_DIR="$STATE_DIR" "$TF_SCALE_AGENT" dns uninstall >/dev/null 2>&1 || true' EXIT
+  ping_name --name "$name"
+  uninstall_dns
+  trap - EXIT
+}
+
+service_smoke() {
+  [ "$(id -u)" -eq 0 ] || fail "service-smoke must run as root because it installs a system service"
+  local login_key=""
+  while [ "$#" -gt 0 ]; do
+    case "$1" in
+      --login-key) login_key="${2:-}"; shift 2 ;;
+      *) fail "unknown service-smoke argument: $1" ;;
+    esac
+  done
+  [ -n "$login_key" ] || fail "missing --login-key"
+
+  TFSCALE_STATE_DIR="$STATE_DIR" "$TF_SCALE_AGENT" service plan \
+    --login-key "$login_key" \
+    --control-url "$CONTROL_URL" \
+    --dns-listen "$DNS_LISTEN"
+  TFSCALE_STATE_DIR="$STATE_DIR" "$TF_SCALE_AGENT" service install \
+    --login-key "$login_key" \
+    --control-url "$CONTROL_URL" \
+    --dns-listen "$DNS_LISTEN"
+  trap 'TFSCALE_STATE_DIR="$STATE_DIR" "$TF_SCALE_AGENT" service uninstall >/dev/null 2>&1 || true' EXIT
+  TFSCALE_STATE_DIR="$STATE_DIR" "$TF_SCALE_AGENT" service status
+  systemctl restart tfscale-agent
+  sleep 2
+  TFSCALE_STATE_DIR="$STATE_DIR" "$TF_SCALE_AGENT" status --json
+  TFSCALE_STATE_DIR="$STATE_DIR" "$TF_SCALE_AGENT" service uninstall
+  trap - EXIT
+}
+
 cleanup() {
+  if [ "$(id -u)" -eq 0 ] && [ -x "$TF_SCALE_AGENT" ]; then
+    TFSCALE_STATE_DIR="$STATE_DIR" "$TF_SCALE_AGENT" dns uninstall >/dev/null 2>&1 || true
+    TFSCALE_STATE_DIR="$STATE_DIR" "$TF_SCALE_AGENT" service uninstall >/dev/null 2>&1 || true
+  fi
   for pid_file in "$WORK_DIR/tfscaled.pid" "$WORK_DIR/tfscale-agent.pid"; do
     if [ -f "$pid_file" ]; then
       kill "$(cat "$pid_file")" >/dev/null 2>&1 || true
@@ -196,8 +299,15 @@ case "$cmd" in
   agent) start_agent "$@" ;;
   status) status ;;
   doctor) doctor ;;
+  dns-status) dns_status ;;
+  install-dns) install_dns ;;
+  uninstall-dns) uninstall_dns ;;
   records) records ;;
   resolve) resolve_name "$@" ;;
+  resolve-first) resolve_first ;;
+  ping-name) ping_name "$@" ;;
+  system-resolver-smoke) system_resolver_smoke ;;
+  service-smoke) service_smoke "$@" ;;
   cleanup) cleanup ;;
   -h|--help|"") usage ;;
   *) usage; fail "unknown command: $cmd" ;;

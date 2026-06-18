@@ -39,6 +39,11 @@ const MIGRATIONS: &[Migration] = &[
         name: "dns_records",
         sql: include_str!("../migrations/0003_dns_records.sql"),
     },
+    Migration {
+        version: 4,
+        name: "endpoint_lookup_index",
+        sql: include_str!("../migrations/0004_endpoint_lookup_index.sql"),
+    },
 ];
 
 struct Migration {
@@ -622,13 +627,21 @@ async fn heartbeat(
     .execute(&mut *tx)
     .await?;
 
-    sqlx::query("DELETE FROM endpoints WHERE device_id = ?")
-        .bind(&request.device_id)
-        .execute(&mut *tx)
-        .await?;
+    sqlx::query(
+        r#"
+        DELETE FROM endpoints
+        WHERE device_id = ?
+          AND expires_at IS NOT NULL
+          AND expires_at <= CURRENT_TIMESTAMP
+        "#,
+    )
+    .bind(&request.device_id)
+    .execute(&mut *tx)
+    .await?;
 
     for endpoint in request.endpoints {
         let source = endpoint.source.as_deref().unwrap_or("local");
+        let endpoint_id = endpoint_id(&request.device_id, &endpoint, source);
         sqlx::query(
             r#"
             INSERT INTO endpoints (
@@ -638,9 +651,19 @@ async fn heartbeat(
                 ?, ?, ?, ?, ?, ?, ?, ?,
                 COALESCE(?, CASE WHEN ? != 'local' THEN datetime('now', '+60 seconds') END)
             )
+            ON CONFLICT(id)
+            DO UPDATE SET
+                kind = excluded.kind,
+                address = excluded.address,
+                port = excluded.port,
+                protocol = excluded.protocol,
+                source = excluded.source,
+                priority = excluded.priority,
+                expires_at = excluded.expires_at,
+                last_seen_at = CURRENT_TIMESTAMP
             "#,
         )
-        .bind(format!("ep_{}", Uuid::now_v7().simple()))
+        .bind(endpoint_id)
         .bind(&request.device_id)
         .bind(&endpoint.kind)
         .bind(&endpoint.address)
@@ -940,6 +963,22 @@ fn hash_secret(secret: &str) -> String {
     hex::encode(Sha256::digest(secret.as_bytes()))
 }
 
+fn endpoint_id(device_id: &str, endpoint: &EndpointPayload, source: &str) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(device_id.as_bytes());
+    hasher.update(b"|");
+    hasher.update(endpoint.kind.as_bytes());
+    hasher.update(b"|");
+    hasher.update(endpoint.address.as_bytes());
+    hasher.update(b"|");
+    hasher.update(endpoint.port.to_string().as_bytes());
+    hasher.update(b"|");
+    hasher.update(endpoint.protocol.as_bytes());
+    hasher.update(b"|");
+    hasher.update(source.as_bytes());
+    format!("ep_{}", hex::encode(hasher.finalize()))
+}
+
 #[derive(Serialize)]
 struct HealthResponse {
     ok: bool,
@@ -1088,7 +1127,30 @@ mod tests {
 
     #[test]
     fn registers_dns_records_migration() {
-        assert_eq!(MIGRATIONS.last().expect("migration").version, 3);
-        assert_eq!(MIGRATIONS.last().expect("migration").name, "dns_records");
+        assert!(
+            MIGRATIONS
+                .iter()
+                .any(|migration| migration.version == 3 && migration.name == "dns_records")
+        );
+    }
+
+    #[test]
+    fn registers_endpoint_lookup_index_migration() {
+        assert_eq!(MIGRATIONS.last().expect("migration").version, 4);
+        assert_eq!(
+            MIGRATIONS.last().expect("migration").name,
+            "endpoint_lookup_index"
+        );
+    }
+
+    #[tokio::test]
+    async fn migrations_apply_to_empty_sqlite_database() {
+        let pool = SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect("sqlite::memory:")
+            .await
+            .expect("sqlite memory database");
+
+        init_schema(&pool).await.expect("migrations");
     }
 }

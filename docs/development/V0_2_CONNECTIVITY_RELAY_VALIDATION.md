@@ -58,7 +58,10 @@ target/debug/tfscalectl --control-url http://<control-ip>:8080 device list
 
 ## 验证 Direct Path
 
-同 LAN 或常见 cone NAT 下，等待两个 agent 同步 10 到 30 秒后执行：
+同 LAN 或常见 cone NAT 下，两个 agent 拿到 peer map 后会先进入快速打洞窗口：
+unknown/relay path 会以约 250ms 间隔向所有 UDP endpoint 发送一小段 encrypted
+probe burst，成功后切到 `direct`，之后回到低频保活。等待两个 agent 同步 3 到
+10 秒后执行：
 
 ```sh
 sudo TFSCALE_STATE_DIR=<agent-state-dir> scripts/connectivity-relay-check.sh status
@@ -67,6 +70,9 @@ ping -c 3 <peer-overlay-ip>
 
 `status --json` 中应看到 peer `path` 为 `direct`，`endpoint` 为对端 LAN 或
 public UDP 地址，`rtt_ms` 有值且 `failures` 较低。
+
+如果还在快速打洞窗口，backend message 中会包含 `fast_probe_peers=<n>`。
+该值降为 `0` 且 peer 仍是 `unknown` 时，说明当前 endpoint 组合可能没有打通。
 
 ## 验证 Relay Fallback
 
@@ -85,6 +91,7 @@ ping -c 3 <peer-overlay-ip>
 ## 常见问题
 
 - `path=unknown`：peer endpoint 还未下发、probe 尚未成功，或 relay metadata 缺失。
+- `fast_probe_peers` 持续大于 0：agent 正在对 unknown/relay peer 进行快速打洞。
 - `failures` 持续增长：UDP 被防火墙/NAT 阻断，检查两端和 control 的端口。
 - `relay list` 为空：control 启动时缺少 `--relay-url`。
 - agent 启动失败并提示 TUN 权限：使用 `sudo`，或给二进制授予 `CAP_NET_ADMIN`。
