@@ -32,12 +32,16 @@ Implemented:
   identity material, local config, and backend-owned peer session state.
 - `tfscale-custom` has Linux TUN setup, TUN read/write boundaries, packet
   framing, crypto helpers, nonce handling, and runtime peer crypto material.
+- `tfscale-custom` has UDP transport loops, Linux packet-loop wiring, and macOS
+  utun platform support.
+- Local E2E smoke scripts and Linux/macOS validation guides are documented.
 
 Known gaps:
 
-- No macOS TUN implementation.
 - Linux TUN still needs privileged host validation result capture.
 - macOS/Linux parity validation is not complete.
+- v0.1 release notes, README quick start, and final known limitations need to be
+  consolidated.
 
 ## Phase 1: Agent Polling and Runtime Loop
 
@@ -237,6 +241,10 @@ Acceptance:
 
 ## Phase 8: macOS TUN/utun Support
 
+Status: macOS platform module, utun creation path, actual interface name status
+reporting, address/route/cleanup command planning, and macOS validation docs are
+implemented. macOS target check and privileged real-device validation remain.
+
 Goal: bring the custom backend TUN runtime to macOS and prove Linux/macOS
 parity for the v0.1 demo.
 
@@ -259,6 +267,29 @@ Acceptance:
 - macOS status reports the actual utun interface name.
 - Linux and macOS agents can ping by overlay IP when directly reachable.
 
+## Phase 9: v0.1 Release Readiness
+
+Goal: make the current implementation understandable, reproducible, and ready
+to tag once Linux/macOS real-device validation passes.
+
+Detailed requirements and release gates are tracked in
+[v0.1 Release Checklist](V0_1_RELEASE_CHECKLIST.md).
+
+Tasks:
+
+- Update README quick start to match the implemented crates and scripts.
+- Consolidate known limitations for v0.1.
+- Link Linux, macOS, and E2E validation docs from the main README.
+- Record final validation commands and expected outputs.
+- Keep release blocked until privileged Linux and macOS parity tests pass.
+
+Acceptance:
+
+- A fresh developer can identify what v0.1 supports and what is out of scope.
+- The README points to one clear local smoke path and one real-device path.
+- The release checklist clearly separates completed code from pending
+  real-device validation.
+
 ## Suggested Execution Order
 
 1. Agent polling and runtime loop.
@@ -269,11 +300,12 @@ Acceptance:
 6. UDP transport on Linux.
 7. End-to-end validation and documentation.
 8. macOS TUN adapter and real-device parity validation.
+9. v0.1 release readiness.
 
 This order keeps control and agent behavior testable before platform networking
 arrives, then proves the data plane on one platform before adding the second.
 
 ## Next Immediate Task
 
-Start macOS TUN implementation from
-[v0.1 Phase 8 macOS TUN/utun Plan](V0_1_PHASE_8_MACOS_TUN_PLAN.md).
+Start v0.1 release readiness from
+[v0.1 Release Checklist](V0_1_RELEASE_CHECKLIST.md).

@@ -61,6 +61,10 @@ or other backends can be added later.
 
 ## Documentation
 
+- [v0.1 E2E Validation](docs/development/E2E_VALIDATION.md)
+- [Linux TUN Validation](docs/development/LINUX_TUN_VALIDATION.md)
+- [macOS TUN Validation](docs/development/MACOS_TUN_VALIDATION.md)
+- [v0.1 Release Checklist](docs/development/V0_1_RELEASE_CHECKLIST.md)
 - [Technical Plan](docs/TECHNICAL_PLAN.md)
 - [MVP Scope](docs/product/MVP.md)
 - [v0.1 Detailed Design](docs/product/V0_1_DETAILED_DESIGN.md)
@@ -106,6 +110,53 @@ The first useful milestone is a minimal two-device mesh:
 6. MagicDNS and custom hostnames follow in v0.2.
 
 See [MVP Scope](docs/product/MVP.md) for details.
+
+## Current v0.1 Status
+
+The current implementation includes:
+
+- `tfscaled` control plane with SQLite migrations, auth keys, device
+  registration, heartbeat storage, device list/rename/delete, and full-mesh
+  peer maps.
+- `tfscalectl` for auth key creation and device management.
+- `tfscale-agent` runtime with persistent local state, heartbeat polling,
+  network-map application, graceful shutdown, and JSON status output.
+- `tfscale-custom` userspace backend with X25519 identity persistence, encrypted
+  packet framing, nonce/replay checks, UDP peer transport, Linux TUN support,
+  and macOS utun support.
+- Local smoke and Linux/macOS validation guides under `scripts/` and
+  `docs/development/`.
+
+Privileged Linux and macOS real-device validation is still required before
+tagging v0.1.
+
+## Quick Start
+
+Run the local control-plane and CLI smoke test without root:
+
+```sh
+cargo test --workspace
+scripts/e2e-control-cli-smoke.sh
+```
+
+For Linux TUN/UDP validation:
+
+```sh
+sudo scripts/linux-phase6-udp-tun-check.sh single-agent
+```
+
+For macOS utun validation, follow
+[macOS TUN Validation](docs/development/MACOS_TUN_VALIDATION.md).
+
+## Known v0.1 Limitations
+
+- Peers must be directly UDP reachable; NAT traversal and relay fallback are not
+  implemented yet.
+- The control plane is single-organization and single-network.
+- MagicDNS, ACLs, subnet routing, exit nodes, admin console, and Windows support
+  are out of scope for v0.1.
+- TUN/utun setup requires root or platform network administration privileges.
+- macOS support is implemented but still needs real-device validation.
 
 ## References
 

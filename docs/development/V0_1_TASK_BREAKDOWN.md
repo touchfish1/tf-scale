@@ -15,17 +15,18 @@ directly reachable.
 | Workstream | Owner | Status |
 | --- | --- | --- |
 | Workspace and shared foundations | TBD | Done |
-| Control plane API and persistence | TBD | In progress |
-| CLI admin flows | TBD | In progress |
-| Agent lifecycle and local state | TBD | In progress |
-| Network backend abstraction | TBD | In progress |
-| Custom backend skeleton | TBD | In progress |
-| Linux TUN adapter | TBD | Not started |
-| macOS TUN adapter | TBD | Not started |
-| Packet crypto and framing | TBD | Not started |
-| UDP peer transport | TBD | Not started |
-| Peer map and polling loop | TBD | In progress |
-| End-to-end validation | TBD | In progress |
+| Control plane API and persistence | TBD | Done |
+| CLI admin flows | TBD | Done |
+| Agent lifecycle and local state | TBD | Done |
+| Network backend abstraction | TBD | Done |
+| Custom backend skeleton | TBD | Done |
+| Linux TUN adapter | TBD | Implemented, pending privileged validation |
+| macOS TUN adapter | TBD | Implemented, pending macOS validation |
+| Packet crypto and framing | TBD | Done |
+| UDP peer transport | TBD | Implemented, pending real-device validation |
+| Peer map and polling loop | TBD | Done |
+| End-to-end validation | TBD | Implemented, pending Linux/macOS results |
+| v0.1 release readiness | TBD | In progress |
 
 ## 1. Workspace and Shared Foundations
 
