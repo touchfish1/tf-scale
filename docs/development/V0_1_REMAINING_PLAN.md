@@ -30,11 +30,14 @@ Implemented:
 - `tfscale-net` exposes backend-neutral traits and test utilities.
 - `tfscale-custom` implements the backend trait and persists versioned X25519
   identity material, local config, and backend-owned peer session state.
+- `tfscale-custom` has Linux TUN setup, TUN read/write boundaries, packet
+  framing, crypto helpers, nonce handling, and runtime peer crypto material.
 
 Known gaps:
 
-- No platform TUN implementation.
-- No packet framing, authenticated encryption, or UDP transport.
+- No UDP transport or TUN packet loop.
+- No macOS TUN implementation.
+- Linux TUN still needs privileged host validation.
 - No repeatable end-to-end demo script.
 
 ## Phase 1: Agent Polling and Runtime Loop
@@ -176,6 +179,11 @@ Acceptance:
 
 ## Phase 6: UDP Peer Transport
 
+Status: detailed design drafted; implementation not started.
+
+Detailed requirements and implementation steps are tracked in
+[v0.1 Phase 6 UDP Peer Transport Plan](V0_1_PHASE_6_UDP_TRANSPORT_PLAN.md).
+
 Goal: carry encrypted backend frames between peers over direct UDP endpoints.
 
 Tasks:
@@ -233,5 +241,5 @@ arrives, then proves the data plane on one platform before adding the second.
 
 ## Next Immediate Task
 
-Start packet framing and crypto implementation from
-[v0.1 Phase 5 Packet Framing and Crypto Plan](V0_1_PHASE_5_PACKET_CRYPTO_PLAN.md).
+Start UDP peer transport implementation from
+[v0.1 Phase 6 UDP Peer Transport Plan](V0_1_PHASE_6_UDP_TRANSPORT_PLAN.md).
