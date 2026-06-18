@@ -18,6 +18,15 @@ pub struct DeviceSummary {
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct DnsRecord {
+    pub device_id: String,
+    pub name: String,
+    #[serde(rename = "type")]
+    pub record_type: String,
+    pub value: String,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct RenameDeviceRequest {
     pub hostname: String,
 }

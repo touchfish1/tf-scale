@@ -8,12 +8,12 @@ use axum::{
 use clap::{Parser, Subcommand};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use sqlx::{Row, SqlitePool, sqlite::SqlitePoolOptions};
+use sqlx::{Row, Sqlite, SqlitePool, Transaction, sqlite::SqlitePoolOptions};
 use std::net::SocketAddr;
 use tfscale_core::{
     DeviceId, NetworkId,
     protocol::{
-        CreateAuthKeyResponse, DeviceSummary, EndpointPayload, EndpointProbeRequest,
+        CreateAuthKeyResponse, DeviceSummary, DnsRecord, EndpointPayload, EndpointProbeRequest,
         EndpointProbeResponse, HeartbeatRequest, HeartbeatResponse, NetworkMapPeer,
         NetworkMapResponse, NetworkMapSelf, RegisterDeviceRequest, RegisterDeviceResponse,
         RelayMetadata, RenameDeviceRequest,
@@ -33,6 +33,11 @@ const MIGRATIONS: &[Migration] = &[
         version: 2,
         name: "endpoint_metadata",
         sql: include_str!("../migrations/0002_endpoint_metadata.sql"),
+    },
+    Migration {
+        version: 3,
+        name: "dns_records",
+        sql: include_str!("../migrations/0003_dns_records.sql"),
     },
 ];
 
@@ -120,6 +125,7 @@ async fn serve(
         .route("/healthz", get(healthz))
         .route("/v1/auth-keys", post(create_auth_key))
         .route("/v1/devices", get(list_devices))
+        .route("/v1/dns/records", get(list_dns_records))
         .route("/v1/relays", get(list_relays))
         .route(
             "/v1/devices/{device_id}",
@@ -270,10 +276,37 @@ async fn list_devices(
     Ok(Json(devices))
 }
 
+async fn list_dns_records(
+    State(state): State<AppState>,
+) -> std::result::Result<Json<Vec<DnsRecord>>, ApiError> {
+    let rows = sqlx::query(
+        r#"
+        SELECT device_id, name, type, value
+        FROM dns_records
+        ORDER BY name ASC, type ASC
+        "#,
+    )
+    .fetch_all(&state.pool)
+    .await?;
+
+    let records = rows
+        .into_iter()
+        .map(|row| DnsRecord {
+            device_id: row.get("device_id"),
+            name: row.get("name"),
+            record_type: row.get("type"),
+            value: row.get("value"),
+        })
+        .collect();
+
+    Ok(Json(records))
+}
+
 async fn delete_device(
     State(state): State<AppState>,
     Path(device_id): Path<String>,
 ) -> std::result::Result<StatusCode, ApiError> {
+    let mut tx = state.pool.begin().await?;
     let result = sqlx::query(
         r#"
         UPDATE devices
@@ -281,13 +314,20 @@ async fn delete_device(
         WHERE id = ? AND deleted_at IS NULL
         "#,
     )
-    .bind(device_id)
-    .execute(&state.pool)
+    .bind(&device_id)
+    .execute(&mut *tx)
     .await?;
 
     if result.rows_affected() == 0 {
         return Err(ApiError::not_found("device not found"));
     }
+
+    sqlx::query("DELETE FROM dns_records WHERE device_id = ?")
+        .bind(device_id)
+        .execute(&mut *tx)
+        .await?;
+
+    tx.commit().await?;
 
     Ok(StatusCode::NO_CONTENT)
 }
@@ -300,6 +340,7 @@ async fn rename_device(
     let hostname = normalize_hostname(&request.hostname)?;
     ensure_hostname_available(&state.pool, &device_id, &hostname).await?;
 
+    let mut tx = state.pool.begin().await?;
     let result = sqlx::query(
         r#"
         UPDATE devices
@@ -309,12 +350,23 @@ async fn rename_device(
     )
     .bind(&hostname)
     .bind(&device_id)
-    .execute(&state.pool)
+    .execute(&mut *tx)
     .await?;
 
     if result.rows_affected() == 0 {
         return Err(ApiError::not_found("device not found"));
     }
+
+    let device = load_device_summary_tx(&mut tx, &device_id).await?;
+    upsert_device_dns_record(
+        &mut tx,
+        "net_default",
+        &device.id,
+        &device.hostname,
+        &device.ipv4,
+    )
+    .await?;
+    tx.commit().await?;
 
     Ok(Json(load_device_summary(&state.pool, &device_id).await?))
 }
@@ -328,6 +380,8 @@ async fn register_device(
     }
 
     validate_auth_key(&state.pool, &request.auth_key).await?;
+    let hostname = normalize_hostname(&request.hostname)?;
+    ensure_hostname_available(&state.pool, "", &hostname).await?;
 
     let network_id = NetworkId::from("net_default".to_string());
     let device_id = DeviceId::new();
@@ -346,7 +400,7 @@ async fn register_device(
     )
     .bind(device_id.as_str())
     .bind(network_id.as_str())
-    .bind(&request.hostname)
+    .bind(&hostname)
     .bind(&request.machine_key)
     .bind(&node_key)
     .bind(&request.backend_type)
@@ -356,6 +410,15 @@ async fn register_device(
     .bind(&request.arch)
     .bind(&request.client_version)
     .execute(&mut *tx)
+    .await?;
+
+    upsert_device_dns_record(
+        &mut tx,
+        network_id.as_str(),
+        device_id.as_str(),
+        &hostname,
+        &ipv4,
+    )
     .await?;
 
     sqlx::query(
@@ -421,6 +484,69 @@ async fn load_device_summary(
         backend_type: row.get("backend_type"),
         last_seen_at: row.get("last_seen_at"),
     })
+}
+
+async fn load_device_summary_tx(
+    tx: &mut Transaction<'_, Sqlite>,
+    device_id: &str,
+) -> std::result::Result<DeviceSummary, ApiError> {
+    let row = sqlx::query(
+        r#"
+        SELECT id, hostname, ipv4, os, arch, backend_type, last_seen_at
+        FROM devices
+        WHERE id = ? AND deleted_at IS NULL
+        "#,
+    )
+    .bind(device_id)
+    .fetch_optional(&mut **tx)
+    .await?;
+
+    let Some(row) = row else {
+        return Err(ApiError::not_found("device not found"));
+    };
+
+    Ok(DeviceSummary {
+        id: row.get("id"),
+        hostname: row.get("hostname"),
+        ipv4: row.get("ipv4"),
+        os: row.get("os"),
+        arch: row.get("arch"),
+        backend_type: row.get("backend_type"),
+        last_seen_at: row.get("last_seen_at"),
+    })
+}
+
+async fn upsert_device_dns_record(
+    tx: &mut Transaction<'_, Sqlite>,
+    network_id: &str,
+    device_id: &str,
+    hostname: &str,
+    ipv4: &str,
+) -> std::result::Result<(), ApiError> {
+    let name = dns_name(hostname);
+    sqlx::query(
+        r#"
+        INSERT INTO dns_records (id, network_id, device_id, name, type, value)
+        VALUES (?, ?, ?, ?, 'A', ?)
+        ON CONFLICT(device_id, type) DO UPDATE SET
+            name = excluded.name,
+            value = excluded.value,
+            updated_at = CURRENT_TIMESTAMP
+        "#,
+    )
+    .bind(format!("dns_{}", Uuid::now_v7().simple()))
+    .bind(network_id)
+    .bind(device_id)
+    .bind(name)
+    .bind(ipv4)
+    .execute(&mut **tx)
+    .await?;
+
+    Ok(())
+}
+
+fn dns_name(hostname: &str) -> String {
+    format!("{hostname}.mesh")
 }
 
 async fn ensure_hostname_available(
@@ -746,6 +872,11 @@ async fn network_map_version(pool: &SqlitePool) -> std::result::Result<i64, ApiE
         sqlx::query_scalar("SELECT COUNT(*) FROM devices WHERE deleted_at IS NULL")
             .fetch_one(pool)
             .await?;
+    let device_timestamp_sum: i64 = sqlx::query_scalar(
+        "SELECT COALESCE(SUM(unixepoch(updated_at)), 0) FROM devices WHERE deleted_at IS NULL",
+    )
+    .fetch_one(pool)
+    .await?;
     let endpoint_count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM endpoints")
         .fetch_one(pool)
         .await?;
@@ -754,7 +885,7 @@ async fn network_map_version(pool: &SqlitePool) -> std::result::Result<i64, ApiE
             .fetch_one(pool)
             .await?;
 
-    Ok(device_count + endpoint_count + endpoint_timestamp_sum)
+    Ok(device_count + device_timestamp_sum + endpoint_count + endpoint_timestamp_sum)
 }
 
 async fn allocate_ipv4(pool: &SqlitePool) -> std::result::Result<String, ApiError> {
@@ -895,6 +1026,11 @@ mod tests {
     }
 
     #[test]
+    fn builds_mesh_dns_name() {
+        assert_eq!(dns_name("devbox"), "devbox.mesh");
+    }
+
+    #[test]
     fn splits_migration_statements() {
         let statements =
             migration_statements("CREATE TABLE one (id TEXT); ; CREATE TABLE two (id TEXT);")
@@ -908,10 +1044,16 @@ mod tests {
 
     #[test]
     fn registers_endpoint_metadata_migration() {
-        assert_eq!(MIGRATIONS.last().expect("migration").version, 2);
-        assert_eq!(
-            MIGRATIONS.last().expect("migration").name,
-            "endpoint_metadata"
+        assert!(
+            MIGRATIONS
+                .iter()
+                .any(|migration| migration.version == 2 && migration.name == "endpoint_metadata")
         );
+    }
+
+    #[test]
+    fn registers_dns_records_migration() {
+        assert_eq!(MIGRATIONS.last().expect("migration").version, 3);
+        assert_eq!(MIGRATIONS.last().expect("migration").name, "dns_records");
     }
 }

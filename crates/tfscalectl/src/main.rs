@@ -4,7 +4,7 @@ use reqwest::{Method, Response, StatusCode};
 use serde::Deserialize;
 use serde::de::DeserializeOwned;
 use tfscale_core::protocol::{
-    CreateAuthKeyResponse, DeviceSummary, RelayMetadata, RenameDeviceRequest,
+    CreateAuthKeyResponse, DeviceSummary, DnsRecord, RelayMetadata, RenameDeviceRequest,
 };
 
 #[derive(Debug, Parser)]
@@ -37,6 +37,10 @@ enum Command {
         #[command(subcommand)]
         command: DeviceCommand,
     },
+    Dns {
+        #[command(subcommand)]
+        command: DnsCommand,
+    },
     Relay {
         #[command(subcommand)]
         command: RelayCommand,
@@ -53,6 +57,11 @@ enum DeviceCommand {
     List,
     Rename { device_id: String, hostname: String },
     Delete { device_id: String },
+}
+
+#[derive(Debug, Subcommand)]
+enum DnsCommand {
+    Records,
 }
 
 #[derive(Debug, Subcommand)]
@@ -133,6 +142,23 @@ async fn main() -> Result<()> {
                 );
             } else {
                 println!("deleted {device_id}");
+            }
+        }
+        Command::Dns {
+            command: DnsCommand::Records,
+        } => {
+            let records: Vec<DnsRecord> = request_json(
+                &client,
+                Method::GET,
+                &cli.control_url,
+                "/v1/dns/records",
+                None,
+            )
+            .await?;
+            if cli.json {
+                println!("{}", serde_json::to_string_pretty(&records)?);
+            } else {
+                print_dns_records(&records);
             }
         }
         Command::Relay {
@@ -264,6 +290,17 @@ fn print_relays(relays: &[RelayMetadata]) {
         println!(
             "{:<16} {:<32} {:<12} {}",
             relay.relay_id, relay.url, relay.region, relay.healthy
+        );
+    }
+}
+
+fn print_dns_records(records: &[DnsRecord]) {
+    println!("{:<28} {:<28} {:<8} VALUE", "DEVICE_ID", "NAME", "TYPE");
+
+    for record in records {
+        println!(
+            "{:<28} {:<28} {:<8} {}",
+            record.device_id, record.name, record.record_type, record.value
         );
     }
 }
