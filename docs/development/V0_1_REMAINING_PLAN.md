@@ -144,6 +144,11 @@ Acceptance:
 
 ## Phase 5: Packet Framing and Crypto
 
+Status: detailed design drafted; implementation not started.
+
+Detailed requirements and implementation steps are tracked in
+[v0.1 Phase 5 Packet Framing and Crypto Plan](V0_1_PHASE_5_PACKET_CRYPTO_PLAN.md).
+
 Goal: define the custom backend packet format and encrypt peer traffic.
 
 Tasks:
@@ -226,4 +231,5 @@ arrives, then proves the data plane on one platform before adding the second.
 
 ## Next Immediate Task
 
-Start platform networking with the Linux TUN adapter next.
+Start packet framing and crypto implementation from
+[v0.1 Phase 5 Packet Framing and Crypto Plan](V0_1_PHASE_5_PACKET_CRYPTO_PLAN.md).
