@@ -43,7 +43,10 @@ enum Command {
         control_url: String,
     },
     Down,
-    Status,
+    Status {
+        #[arg(long)]
+        json: bool,
+    },
 }
 
 #[tokio::main]
@@ -65,23 +68,66 @@ async fn main() -> Result<()> {
             backend.shutdown().await?;
             println!("agent backend stopped");
         }
-        Command::Status => {
+        Command::Status { json } => {
             let backend = CustomBackend::with_state_dir(DEFAULT_INTERFACE_NAME, &state_dir);
             let status = backend.status().await?;
             let state = AgentState::load(&state_dir)?.unwrap_or_default();
-            println!(
-                "device={} ipv4={} backend={} interface={} healthy={} message={}",
-                state.device_id.as_deref().unwrap_or("-"),
-                state.ipv4.as_deref().unwrap_or("-"),
-                status.backend_type.as_str(),
-                status.interface_name,
-                status.healthy,
-                status.message.unwrap_or_default()
-            );
+            if json {
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&AgentStatusOutput::from_state_and_status(
+                        state, status,
+                    ))?
+                );
+            } else {
+                println!(
+                    "device={} ipv4={} backend={} interface={} healthy={} message={}",
+                    state.device_id.as_deref().unwrap_or("-"),
+                    state.ipv4.as_deref().unwrap_or("-"),
+                    status.backend_type.as_str(),
+                    status.interface_name,
+                    status.healthy,
+                    status.message.unwrap_or_default()
+                );
+            }
         }
     }
 
     Ok(())
+}
+
+#[derive(Debug, Serialize)]
+struct AgentStatusOutput {
+    device_id: Option<String>,
+    network_id: Option<String>,
+    ipv4: Option<String>,
+    backend_public_credential_present: bool,
+    backend: BackendStatusOutput,
+}
+
+#[derive(Debug, Serialize)]
+struct BackendStatusOutput {
+    backend_type: String,
+    interface_name: String,
+    healthy: bool,
+    message: Option<String>,
+}
+
+impl AgentStatusOutput {
+    fn from_state_and_status(state: AgentState, status: tfscale_net::BackendStatus) -> Self {
+        Self {
+            device_id: state.device_id,
+            network_id: state.network_id,
+            ipv4: state.ipv4,
+            backend_public_credential_present: !state.backend_public_credential.is_empty(),
+            backend: BackendStatusOutput {
+                backend_type: status.backend_type.as_str().to_string(),
+                interface_name: status.interface_name,
+                healthy: status.healthy,
+                message: status.message,
+            },
+        }
+    }
 }
 
 fn init_tracing() {

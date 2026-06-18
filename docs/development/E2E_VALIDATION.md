@@ -144,12 +144,14 @@ target/debug/tfscalectl device list
 
 ```sh
 scripts/linux-phase6-udp-tun-check.sh status
+TFSCALE_STATE_DIR=<agent-state-dir> target/debug/tfscale-agent status --json
 ```
 
 成功标准：
 
 - `device list` 不再显示被删除设备。
-- 存活 agent 后续 peer map 不再包含被删除设备。
+- 存活 agent 的 `status --json` 仍显示本机 `device_id` 和 `ipv4`，backend
+  `message` 中的 `transport_peers` / `transport_sessions` 已随 peer map 收敛。
 - 对被删除设备 overlay IP 的 ping 不应继续成功。
 
 ## 常见问题
@@ -161,4 +163,3 @@ scripts/linux-phase6-udp-tun-check.sh status
 - control host 不可达：检查监听地址、防火墙和 `TFSCALE_CONTROL_URL`。
 - UDP 不通：检查两台 agent 间的防火墙、安全组和路由。
 - packet counters 不增长：确认 ping 的目标是对端 overlay IP。
-

@@ -198,6 +198,9 @@ print_agent_status() {
   log "agent status"
   TFSCALE_STATE_DIR="$STATE_DIR" "$TF_SCALE_AGENT" status || true
 
+  log "agent status json"
+  TFSCALE_STATE_DIR="$STATE_DIR" "$TF_SCALE_AGENT" status --json || true
+
   log "interface"
   ip addr show tfscale0 || true
 
