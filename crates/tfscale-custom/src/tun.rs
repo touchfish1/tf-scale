@@ -26,6 +26,7 @@ impl TunConfig {
 pub(crate) struct TunStatus {
     pub configured: bool,
     pub interface_name: String,
+    pub io_ready: bool,
     pub message: Option<String>,
 }
 
@@ -35,6 +36,7 @@ impl TunStatus {
         Self {
             configured: true,
             interface_name: interface_name.into(),
+            io_ready: true,
             message: None,
         }
     }
@@ -43,13 +45,97 @@ impl TunStatus {
         Self {
             configured: false,
             interface_name: interface_name.into(),
+            io_ready: false,
             message: Some(message.into()),
         }
     }
 }
 
-pub(crate) fn configure_tun(config: &TunConfig) -> Result<TunStatus> {
-    crate::platform::configure_tun(config)
+pub(crate) struct TunDevice {
+    inner: PlatformTunDevice,
+}
+
+impl TunDevice {
+    pub fn configure(config: &TunConfig) -> Result<Self> {
+        Ok(Self {
+            inner: crate::platform::configure_tun(config)?,
+        })
+    }
+
+    pub fn status(&self) -> TunStatus {
+        self.inner.status()
+    }
+
+    #[allow(dead_code)]
+    pub fn read_packet(&self, buffer: &mut [u8]) -> Result<usize> {
+        self.inner.read_packet(buffer)
+    }
+
+    #[allow(dead_code)]
+    pub fn write_packet(&self, packet: &[u8]) -> Result<usize> {
+        self.inner.write_packet(packet)
+    }
+
+    pub fn shutdown(self) -> Result<()> {
+        self.inner.shutdown()
+    }
+}
+
+pub(crate) struct PlatformTunDevice {
+    #[cfg(target_os = "linux")]
+    pub(crate) inner: crate::platform::linux::LinuxTunDevice,
+}
+
+impl PlatformTunDevice {
+    pub fn status(&self) -> TunStatus {
+        #[cfg(target_os = "linux")]
+        {
+            self.inner.status()
+        }
+
+        #[cfg(not(target_os = "linux"))]
+        {
+            TunStatus::failed("unsupported", unsupported_platform_error().to_string())
+        }
+    }
+
+    pub fn read_packet(&self, buffer: &mut [u8]) -> Result<usize> {
+        #[cfg(target_os = "linux")]
+        {
+            self.inner.read_packet(buffer)
+        }
+
+        #[cfg(not(target_os = "linux"))]
+        {
+            let _ = buffer;
+            Err(unsupported_platform_error())
+        }
+    }
+
+    pub fn write_packet(&self, packet: &[u8]) -> Result<usize> {
+        #[cfg(target_os = "linux")]
+        {
+            self.inner.write_packet(packet)
+        }
+
+        #[cfg(not(target_os = "linux"))]
+        {
+            let _ = packet;
+            Err(unsupported_platform_error())
+        }
+    }
+
+    pub fn shutdown(self) -> Result<()> {
+        #[cfg(target_os = "linux")]
+        {
+            self.inner.shutdown()
+        }
+
+        #[cfg(not(target_os = "linux"))]
+        {
+            Err(unsupported_platform_error())
+        }
+    }
 }
 
 #[cfg_attr(target_os = "linux", allow(dead_code))]
@@ -76,5 +162,14 @@ mod tests {
         assert_eq!(config.overlay_ip, Ipv4Addr::new(100, 64, 0, 2));
         assert_eq!(config.listen_port, 51820);
         assert_eq!(config.overlay_cidr, "100.64.0.0/10");
+    }
+
+    #[test]
+    fn failed_status_is_not_io_ready() {
+        let status = TunStatus::failed("tfscale0", "not ready");
+
+        assert!(!status.configured);
+        assert!(!status.io_ready);
+        assert_eq!(status.interface_name, "tfscale0");
     }
 }

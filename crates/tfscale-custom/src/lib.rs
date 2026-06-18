@@ -19,13 +19,13 @@ use x25519_dalek::{PublicKey, StaticSecret};
 mod platform;
 mod tun;
 
-use tun::{TunConfig, TunStatus, configure_tun};
+use tun::{TunConfig, TunDevice, TunStatus};
 
 const STATE_VERSION: u32 = 1;
 const IDENTITY_SCHEME: &str = "x25519";
 const PUBLIC_CREDENTIAL_PREFIX: &str = "tfpk1_";
 
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub struct CustomBackend {
     interface_name: String,
     state_path: PathBuf,
@@ -99,8 +99,10 @@ impl CustomBackend {
             .lock()
             .map_err(|error| BackendError::CommandFailed(error.to_string()))?;
         let tun_status = runtime.tun_status.clone();
+        let tun_device = runtime.tun_device.take();
         *runtime = RuntimeState::from_persisted(state);
         runtime.tun_status = tun_status;
+        runtime.tun_device = tun_device;
         Ok(())
     }
 
@@ -109,6 +111,17 @@ impl CustomBackend {
             .lock()
             .map_err(|error| BackendError::CommandFailed(error.to_string()))?
             .tun_status = Some(status);
+        Ok(())
+    }
+
+    fn set_tun_device(&self, device: TunDevice) -> Result<()> {
+        let status = device.status();
+        let mut runtime = self
+            .state
+            .lock()
+            .map_err(|error| BackendError::CommandFailed(error.to_string()))?;
+        runtime.tun_status = Some(status);
+        runtime.tun_device = Some(device);
         Ok(())
     }
 }
@@ -159,12 +172,13 @@ struct StoredPeerSession {
     last_updated_at_unix_seconds: u64,
 }
 
-#[derive(Clone, Debug, Default)]
+#[derive(Default)]
 struct RuntimeState {
     persisted: CustomBackendState,
     peers_by_device: HashMap<String, StoredPeerSession>,
     peers_by_overlay_ip: HashMap<Ipv4Addr, String>,
     tun_status: Option<TunStatus>,
+    tun_device: Option<TunDevice>,
 }
 
 impl RuntimeState {
@@ -185,6 +199,7 @@ impl RuntimeState {
             peers_by_device,
             peers_by_overlay_ip,
             tun_status: None,
+            tun_device: None,
         }
     }
 }
@@ -364,9 +379,9 @@ impl NetworkBackend for CustomBackend {
             return Ok(());
         }
 
-        match configure_tun(&tun_config) {
-            Ok(status) => {
-                self.set_tun_status(status)?;
+        match TunDevice::configure(&tun_config) {
+            Ok(device) => {
+                self.set_tun_device(device)?;
                 Ok(())
             }
             Err(error) => {
@@ -404,27 +419,45 @@ impl NetworkBackend for CustomBackend {
             .as_ref()
             .map(|status| status.configured)
             .unwrap_or(false);
+        let tun_io_ready = tun_status
+            .as_ref()
+            .map(|status| status.io_ready)
+            .unwrap_or(false);
         let tun_message = tun_status
             .and_then(|status| status.message)
             .unwrap_or_else(|| "not_configured".to_string());
         Ok(BackendStatus {
             backend_type: self.backend_type(),
             interface_name: self.interface_name.clone(),
-            healthy: tun_configured,
+            healthy: tun_configured && tun_io_ready,
             message: Some(format!(
-                "custom backend state: credentials={} local_config={} peers={} peer_indexes=device:{} overlay:{} tun_configured={} tun_message={} data_plane=not_started",
+                "custom backend state: credentials={} local_config={} peers={} peer_indexes=device:{} overlay:{} tun_configured={} tun_io_ready={} tun_message={} data_plane=not_started",
                 has_credentials,
                 has_local_config,
                 runtime.persisted.peers.len(),
                 runtime.peers_by_device.len(),
                 runtime.peers_by_overlay_ip.len(),
                 tun_configured,
+                tun_io_ready,
                 tun_message
             )),
         })
     }
 
     async fn shutdown(&self) -> Result<()> {
+        let device = self
+            .state
+            .lock()
+            .map_err(|error| BackendError::CommandFailed(error.to_string()))?
+            .tun_device
+            .take();
+
+        if let Some(device) = device {
+            let interface_name = device.status().interface_name;
+            device.shutdown()?;
+            self.set_tun_status(TunStatus::failed(interface_name, "TUN device shut down"))?;
+        }
+
         Ok(())
     }
 }
@@ -608,7 +641,18 @@ mod tests {
 
         assert!(!status.healthy);
         assert!(message.contains("tun_configured=false"));
+        assert!(message.contains("tun_io_ready=false"));
         assert!(message.contains("TUN setup skipped"));
+
+        cleanup_state(&state_path);
+    }
+
+    #[tokio::test]
+    async fn shutdown_without_tun_device_succeeds() {
+        let state_path = temp_state_path("shutdown-no-tun");
+        let backend = test_backend(&state_path);
+
+        backend.shutdown().await.expect("shutdown");
 
         cleanup_state(&state_path);
     }

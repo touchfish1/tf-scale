@@ -19,6 +19,10 @@ Implemented in the current development branch:
 - Linux command planning is implemented and unit-tested.
 - `apply_local_config()` persists local config, attempts TUN setup, and stores
   runtime TUN status.
+- Runtime state keeps the configured TUN device handle so later packet loops can
+  read and write packets without reopening the interface.
+- TUN read/write boundaries are exposed through the backend-private adapter.
+- Shutdown takes the runtime TUN device and runs planned Linux cleanup commands.
 - Non-Linux platforms return an explicit unsupported-platform error for real
   TUN setup.
 - Tests avoid privileged TUN access and cover config/status behavior.
@@ -31,7 +35,7 @@ Still remaining:
 - Manual privileged Linux validation.
 - Packet read/write loop.
 - macOS utun implementation.
-- Shutdown cleanup beyond dropping runtime resources.
+- Packet framing, crypto, and peer transport.
 
 ## Decision
 
@@ -100,15 +104,15 @@ crates/tfscale-custom/src/
     macos.rs
 ```
 
-`tun.rs` should define backend-private types:
+`tun.rs` defines backend-private types:
 
 - `TunConfig`
 - `TunStatus`
-- `TunAdapter`
-- `TunError` or conversion into `BackendError`
+- `TunDevice`
+- `PlatformTunDevice`
 
-`platform/linux.rs` should own Linux-specific command construction and command
-execution.
+`platform/linux.rs` owns Linux-specific command construction, command execution,
+TUN device creation, packet read/write calls, and cleanup planning.
 
 ## Apply Local Config Flow
 
@@ -121,6 +125,7 @@ When `apply_local_config()` receives `LocalBackendConfig`:
 5. Bring the interface up.
 6. Install or replace route `100.64.0.0/10`.
 7. Update runtime status with TUN readiness.
+8. Keep the TUN device handle in runtime state until backend shutdown.
 
 If TUN setup fails, preserve the local config in state but report status as
 unhealthy with the failure message.
@@ -170,13 +175,16 @@ Unit tests:
 - Build Linux `ip` command arguments.
 - Reject unsupported platforms with `BackendError::UnsupportedPlatform`.
 - Preserve state when TUN setup is skipped or mocked.
+- Report both `tun_configured` and `tun_io_ready` in backend status.
+- Shutdown with no active TUN device is a successful no-op.
 
 Integration/manual tests:
 
 - Linux host can create `tfscale0`.
 - `ip addr show tfscale0` shows assigned `/32`.
 - `ip route show 100.64.0.0/10` points to `tfscale0`.
-- Running `tfscale-agent down` releases runtime resources.
+- Running `tfscale-agent down` releases runtime resources and removes the route
+  and link when the backend owns the TUN device.
 
 Use `scripts/linux-tun-check.sh` for Linux preflight checks and command
 guidance.

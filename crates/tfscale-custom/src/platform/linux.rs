@@ -19,17 +19,81 @@ impl PlannedCommand {
     }
 }
 
-pub(crate) fn configure_tun(config: &TunConfig) -> Result<TunStatus> {
-    configure_tun_device(config)?;
+pub(crate) struct LinuxTunDevice {
+    interface_name: String,
+    cleanup_commands: Vec<PlannedCommand>,
+    #[cfg(target_os = "linux")]
+    device: tun_rs::SyncDevice,
+}
+
+impl LinuxTunDevice {
+    pub(crate) fn status(&self) -> TunStatus {
+        TunStatus::configured(self.interface_name.clone())
+    }
+
+    pub(crate) fn read_packet(&self, buffer: &mut [u8]) -> Result<usize> {
+        #[cfg(target_os = "linux")]
+        {
+            self.device
+                .recv(buffer)
+                .map_err(|error| BackendError::CommandFailed(error.to_string()))
+        }
+
+        #[cfg(not(target_os = "linux"))]
+        {
+            let _ = buffer;
+            Err(BackendError::UnsupportedPlatform(format!(
+                "Linux TUN read cannot run on {}",
+                std::env::consts::OS
+            )))
+        }
+    }
+
+    pub(crate) fn write_packet(&self, packet: &[u8]) -> Result<usize> {
+        #[cfg(target_os = "linux")]
+        {
+            self.device
+                .send(packet)
+                .map_err(|error| BackendError::CommandFailed(error.to_string()))
+        }
+
+        #[cfg(not(target_os = "linux"))]
+        {
+            let _ = packet;
+            Err(BackendError::UnsupportedPlatform(format!(
+                "Linux TUN write cannot run on {}",
+                std::env::consts::OS
+            )))
+        }
+    }
+
+    pub(crate) fn shutdown(self) -> Result<()> {
+        for command in self.cleanup_commands {
+            let _ = run_command(&command);
+        }
+        Ok(())
+    }
+}
+
+#[cfg(target_os = "linux")]
+pub(crate) fn configure_tun(config: &TunConfig) -> Result<crate::tun::PlatformTunDevice> {
+    let device = configure_tun_device(config)?;
     for command in plan_ip_commands(config) {
         run_command(&command)?;
     }
 
-    Ok(TunStatus::configured(config.interface_name.clone()))
+    Ok(crate::tun::PlatformTunDevice {
+        inner: LinuxTunDevice {
+            interface_name: config.interface_name.clone(),
+            cleanup_commands: plan_cleanup_commands(config),
+            #[cfg(target_os = "linux")]
+            device,
+        },
+    })
 }
 
 #[cfg(target_os = "linux")]
-fn configure_tun_device(config: &TunConfig) -> Result<()> {
+fn configure_tun_device(config: &TunConfig) -> Result<tun_rs::SyncDevice> {
     if !std::path::Path::new("/dev/net/tun").exists() {
         return Err(BackendError::MissingCommand(
             "missing Linux TUN device: /dev/net/tun".to_string(),
@@ -43,17 +107,7 @@ fn configure_tun_device(config: &TunConfig) -> Result<()> {
         .build_sync()
         .map_err(|error| {
             BackendError::CommandFailed(format!("failed to create TUN device: {error}"))
-        })?;
-
-    Ok(())
-}
-
-#[cfg(not(target_os = "linux"))]
-fn configure_tun_device(_config: &TunConfig) -> Result<()> {
-    Err(BackendError::UnsupportedPlatform(format!(
-        "Linux TUN setup cannot run on {}",
-        std::env::consts::OS
-    )))
+        })
 }
 
 pub(crate) fn plan_ip_commands(config: &TunConfig) -> Vec<PlannedCommand> {
@@ -84,6 +138,29 @@ pub(crate) fn plan_ip_commands(config: &TunConfig) -> Vec<PlannedCommand> {
                 "replace".to_string(),
                 config.overlay_cidr.clone(),
                 "dev".to_string(),
+                config.interface_name.clone(),
+            ],
+        ),
+    ]
+}
+
+pub(crate) fn plan_cleanup_commands(config: &TunConfig) -> Vec<PlannedCommand> {
+    vec![
+        PlannedCommand::new(
+            "ip",
+            [
+                "route".to_string(),
+                "del".to_string(),
+                config.overlay_cidr.clone(),
+                "dev".to_string(),
+                config.interface_name.clone(),
+            ],
+        ),
+        PlannedCommand::new(
+            "ip",
+            [
+                "link".to_string(),
+                "del".to_string(),
                 config.interface_name.clone(),
             ],
         ),
@@ -142,6 +219,24 @@ mod tests {
                     "ip",
                     ["route", "replace", "100.64.0.0/10", "dev", "tfscale0"]
                 ),
+            ]
+        );
+    }
+
+    #[test]
+    fn plans_linux_cleanup_commands() {
+        let commands = plan_cleanup_commands(&TunConfig {
+            interface_name: "tfscale0".to_string(),
+            overlay_ip: Ipv4Addr::new(100, 64, 0, 2),
+            listen_port: 51820,
+            overlay_cidr: "100.64.0.0/10".to_string(),
+        });
+
+        assert_eq!(
+            commands,
+            vec![
+                PlannedCommand::new("ip", ["route", "del", "100.64.0.0/10", "dev", "tfscale0"]),
+                PlannedCommand::new("ip", ["link", "del", "tfscale0"]),
             ]
         );
     }
