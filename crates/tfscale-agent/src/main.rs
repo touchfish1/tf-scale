@@ -241,13 +241,19 @@ async fn send_heartbeat(
 ) -> Result<()> {
     let (device_id, node_key) = device_credentials(state)?;
     let status = backend.status().await?;
+    let endpoints = backend
+        .local_endpoints()
+        .await?
+        .into_iter()
+        .map(endpoint_to_payload)
+        .collect::<Vec<_>>();
 
     client
         .post(format!("{control_url}/v1/agent/heartbeat"))
         .json(&HeartbeatRequest {
             device_id: device_id.to_string(),
             node_key: node_key.to_string(),
-            endpoints: Vec::new(),
+            endpoints,
             backend_status: BackendStatusPayload {
                 backend_type: status.backend_type.as_str().to_string(),
                 interface: status.interface_name,
@@ -370,6 +376,15 @@ fn endpoint_to_config(endpoint: EndpointPayload) -> Result<Endpoint> {
     })
 }
 
+fn endpoint_to_payload(endpoint: Endpoint) -> EndpointPayload {
+    EndpointPayload {
+        kind: endpoint_kind_to_payload(endpoint.kind).to_string(),
+        address: endpoint.address.to_string(),
+        port: endpoint.port,
+        protocol: transport_protocol_to_payload(endpoint.protocol).to_string(),
+    }
+}
+
 fn parse_endpoint_kind(value: &str) -> Result<EndpointKind> {
     match value {
         "lan" => Ok(EndpointKind::Lan),
@@ -377,6 +392,15 @@ fn parse_endpoint_kind(value: &str) -> Result<EndpointKind> {
         "ipv6" => Ok(EndpointKind::Ipv6),
         "relay" => Ok(EndpointKind::Relay),
         other => bail!("unsupported endpoint kind: {other}"),
+    }
+}
+
+fn endpoint_kind_to_payload(value: EndpointKind) -> &'static str {
+    match value {
+        EndpointKind::Lan => "lan",
+        EndpointKind::Public => "public",
+        EndpointKind::Ipv6 => "ipv6",
+        EndpointKind::Relay => "relay",
     }
 }
 
@@ -614,6 +638,21 @@ mod tests {
     }
 
     #[test]
+    fn converts_backend_endpoint_to_heartbeat_payload() {
+        let payload = endpoint_to_payload(Endpoint {
+            kind: EndpointKind::Lan,
+            address: IpAddr::from(Ipv4Addr::new(192, 168, 1, 30)),
+            port: 51820,
+            protocol: TransportProtocol::Udp,
+        });
+
+        assert_eq!(payload.kind, "lan");
+        assert_eq!(payload.address, "192.168.1.30");
+        assert_eq!(payload.port, 51820);
+        assert_eq!(payload.protocol, "udp");
+    }
+
+    #[test]
     fn rejects_invalid_peer_overlay_ip() {
         let peer = NetworkMapPeer {
             device_id: "dev_test".to_string(),
@@ -663,5 +702,12 @@ mod tests {
                 allowed_routes: vec!["100.64.0.3/32".to_string()],
             }],
         }
+    }
+}
+
+fn transport_protocol_to_payload(value: TransportProtocol) -> &'static str {
+    match value {
+        TransportProtocol::Udp => "udp",
+        TransportProtocol::Tcp => "tcp",
     }
 }

@@ -109,6 +109,7 @@ pub trait NetworkBackend: Send + Sync {
     async fn ensure_credentials(&self) -> Result<BackendCredential>;
     async fn apply_local_config(&self, config: LocalBackendConfig) -> Result<()>;
     async fn apply_peer_map(&self, peers: Vec<PeerConfig>) -> Result<()>;
+    async fn local_endpoints(&self) -> Result<Vec<Endpoint>>;
     async fn status(&self) -> Result<BackendStatus>;
     async fn shutdown(&self) -> Result<()>;
 }
@@ -124,6 +125,7 @@ pub mod testing {
         credential: BackendCredential,
         backend_type: BackendType,
         capabilities: BackendCapabilities,
+        endpoints: Vec<Endpoint>,
     }
 
     #[derive(Clone, Debug, Default)]
@@ -147,7 +149,13 @@ pub mod testing {
                     supports_dynamic_peers: true,
                     ..BackendCapabilities::default()
                 },
+                endpoints: Vec::new(),
             }
+        }
+
+        pub fn with_endpoints(mut self, endpoints: Vec<Endpoint>) -> Self {
+            self.endpoints = endpoints;
+            self
         }
 
         pub fn snapshot(&self) -> MockBackendState {
@@ -189,6 +197,10 @@ pub mod testing {
                 .peer_maps
                 .push(peers);
             Ok(())
+        }
+
+        async fn local_endpoints(&self) -> Result<Vec<Endpoint>> {
+            Ok(self.endpoints.clone())
         }
 
         async fn status(&self) -> Result<BackendStatus> {

@@ -17,7 +17,27 @@ relay fallback, endpoint probing, and macOS validation stay out of scope.
 - Packet frame, AEAD crypto, nonce, and replay helpers exist.
 - Control plane heartbeat already accepts endpoint payloads.
 - Control plane network maps already include peer endpoints.
-- `tfscale-agent` currently sends empty heartbeat endpoints.
+
+## Current Status
+
+Implemented in the current development branch:
+
+- `NetworkBackend::local_endpoints()` exposes backend-owned endpoints.
+- `tfscale-agent` publishes backend endpoints in heartbeat payloads.
+- `tfscale-custom` binds a UDP socket after local config is applied.
+- The custom backend reports a LAN UDP endpoint for control-plane publication.
+- Peer map application selects LAN UDP endpoints into runtime transport state.
+- Backend status includes UDP bound state, local endpoint count, peer endpoint
+  count, and packet counters.
+- `packet.rs` parses IPv4 destinations for later TUN-to-peer routing.
+- `transport.rs` can send and receive UDP frames on loopback in tests.
+
+Still remaining:
+
+- Build full `PeerCryptoSession` values from real local/peer frame IDs.
+- Route TUN packets through crypto sessions to selected UDP endpoints.
+- Decrypt received UDP frames and write plaintext packets back to TUN.
+- Add transport task lifecycle and cancellation around the blocking TUN loop.
 
 ## Architecture
 
@@ -227,8 +247,8 @@ Manual validation:
 3. Add `packet.rs` with IPv4 destination parsing tests.
 4. Add `transport.rs` UDP socket binding and local endpoint reporting.
 5. Build peer endpoint selection and transport status structs.
-6. Construct `PeerCryptoSession` values from local identity and peer map.
-7. Add synthetic UDP transport tests using loopback sockets.
+6. Add synthetic UDP transport tests using loopback sockets.
+7. Construct `PeerCryptoSession` values from local identity and peer map.
 8. Connect TUN read/write loops behind runtime start/stop.
 9. Update backend status and shutdown cleanup.
 10. Add Linux manual validation notes for UDP traffic.

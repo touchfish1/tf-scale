@@ -179,7 +179,9 @@ Acceptance:
 
 ## Phase 6: UDP Peer Transport
 
-Status: detailed design drafted; implementation not started.
+Status: endpoint publication, UDP socket binding, peer endpoint selection,
+transport status fields, IPv4 destination parsing, and loopback UDP frame tests
+are implemented. TUN packet-loop and crypto session wiring remain.
 
 Detailed requirements and implementation steps are tracked in
 [v0.1 Phase 6 UDP Peer Transport Plan](V0_1_PHASE_6_UDP_TRANSPORT_PLAN.md).

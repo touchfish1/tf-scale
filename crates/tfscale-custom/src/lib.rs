@@ -19,10 +19,13 @@ use x25519_dalek::{PublicKey, StaticSecret};
 mod crypto;
 mod frame;
 mod nonce;
+mod packet;
 mod platform;
+mod transport;
 mod tun;
 
 use crypto::decode_public_credential;
+use transport::{TransportRuntime, select_udp_endpoint};
 use tun::{TunConfig, TunDevice, TunStatus};
 
 const STATE_VERSION: u32 = 1;
@@ -104,9 +107,11 @@ impl CustomBackend {
             .map_err(|error| BackendError::CommandFailed(error.to_string()))?;
         let tun_status = runtime.tun_status.clone();
         let tun_device = runtime.tun_device.take();
+        let transport = runtime.transport.take();
         *runtime = RuntimeState::from_persisted(state);
         runtime.tun_status = tun_status;
         runtime.tun_device = tun_device;
+        runtime.transport = transport;
         Ok(())
     }
 
@@ -126,6 +131,20 @@ impl CustomBackend {
             .map_err(|error| BackendError::CommandFailed(error.to_string()))?;
         runtime.tun_status = Some(status);
         runtime.tun_device = Some(device);
+        Ok(())
+    }
+
+    fn bind_transport(&self, listen_port: u16) -> Result<()> {
+        self.state
+            .lock()
+            .map_err(|error| BackendError::CommandFailed(error.to_string()))?
+            .transport
+            .take();
+        let transport = TransportRuntime::bind(listen_port)?;
+        self.state
+            .lock()
+            .map_err(|error| BackendError::CommandFailed(error.to_string()))?
+            .transport = Some(transport);
         Ok(())
     }
 }
@@ -182,12 +201,15 @@ struct RuntimeState {
     peers_by_device: HashMap<String, StoredPeerSession>,
     peers_by_overlay_ip: HashMap<Ipv4Addr, String>,
     peer_crypto_material_by_device: HashMap<String, PeerCryptoMaterial>,
+    peer_udp_endpoints_by_device: HashMap<String, Endpoint>,
     tun_status: Option<TunStatus>,
     tun_device: Option<TunDevice>,
+    transport: Option<TransportRuntime>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 struct PeerCryptoMaterial {
+    #[allow(dead_code)]
     public_key: [u8; 32],
 }
 
@@ -212,14 +234,24 @@ impl RuntimeState {
                     .map(|public_key| (peer.device_id.clone(), PeerCryptoMaterial { public_key }))
             })
             .collect();
+        let peer_udp_endpoints_by_device = persisted
+            .peers
+            .iter()
+            .filter_map(|peer| {
+                select_udp_endpoint(&peer.endpoints)
+                    .map(|endpoint| (peer.device_id.clone(), endpoint))
+            })
+            .collect();
 
         Self {
             persisted,
             peers_by_device,
             peers_by_overlay_ip,
             peer_crypto_material_by_device,
+            peer_udp_endpoints_by_device,
             tun_status: None,
             tun_device: None,
+            transport: None,
         }
     }
 }
@@ -390,6 +422,7 @@ impl NetworkBackend for CustomBackend {
             .local_config
             .expect("local config was just persisted");
         let tun_config = TunConfig::from_local_config(&config);
+        self.bind_transport(tun_config.listen_port)?;
         if !self.tun_setup_enabled {
             let status = TunStatus::failed(
                 tun_config.interface_name.clone(),
@@ -424,6 +457,17 @@ impl NetworkBackend for CustomBackend {
         Ok(())
     }
 
+    async fn local_endpoints(&self) -> Result<Vec<Endpoint>> {
+        Ok(self
+            .state
+            .lock()
+            .map_err(|error| BackendError::CommandFailed(error.to_string()))?
+            .transport
+            .as_ref()
+            .map(TransportRuntime::local_endpoints)
+            .unwrap_or_default())
+    }
+
     async fn status(&self) -> Result<BackendStatus> {
         let state = self.load_state()?;
         let runtime = RuntimeState::from_persisted(state);
@@ -446,18 +490,36 @@ impl NetworkBackend for CustomBackend {
         let tun_message = tun_status
             .and_then(|status| status.message)
             .unwrap_or_else(|| "not_configured".to_string());
+        let transport_status = self
+            .state
+            .lock()
+            .map_err(|error| BackendError::CommandFailed(error.to_string()))?
+            .transport
+            .as_ref()
+            .map(TransportRuntime::status)
+            .unwrap_or_default();
+        let transport_peers = runtime.peer_udp_endpoints_by_device.len();
+        let reachable_peers = transport_peers;
         Ok(BackendStatus {
             backend_type: self.backend_type(),
             interface_name: self.interface_name.clone(),
-            healthy: tun_configured && tun_io_ready,
+            healthy: tun_configured && tun_io_ready && transport_status.udp_bound,
             message: Some(format!(
-                "custom backend state: credentials={} local_config={} peers={} peer_indexes=device:{} overlay:{} crypto_peers={} tun_configured={} tun_io_ready={} tun_message={} data_plane=not_started",
+                "custom backend state: credentials={} local_config={} peers={} peer_indexes=device:{} overlay:{} crypto_peers={} udp_bound={} local_endpoints={} transport_peers={} reachable_peers={} tx_packets={} rx_packets={} tx_drops={} rx_drops={} tun_configured={} tun_io_ready={} tun_message={} data_plane=transport_ready",
                 has_credentials,
                 has_local_config,
                 runtime.persisted.peers.len(),
                 runtime.peers_by_device.len(),
                 runtime.peers_by_overlay_ip.len(),
                 runtime.peer_crypto_material_by_device.len(),
+                transport_status.udp_bound,
+                transport_status.local_endpoints,
+                transport_peers,
+                reachable_peers,
+                transport_status.tx_packets,
+                transport_status.rx_packets,
+                transport_status.tx_drops,
+                transport_status.rx_drops,
                 tun_configured,
                 tun_io_ready,
                 tun_message
@@ -466,6 +528,11 @@ impl NetworkBackend for CustomBackend {
     }
 
     async fn shutdown(&self) -> Result<()> {
+        self.state
+            .lock()
+            .map_err(|error| BackendError::CommandFailed(error.to_string()))?
+            .transport
+            .take();
         let device = self
             .state
             .lock()
@@ -538,7 +605,7 @@ mod tests {
             .apply_local_config(LocalBackendConfig {
                 interface_name: "tfscale0".to_string(),
                 overlay_ip: Ipv4Addr::new(100, 64, 0, 2),
-                listen_port: 51820,
+                listen_port: 0,
             })
             .await
             .expect("local config");
@@ -648,7 +715,7 @@ mod tests {
             .apply_local_config(LocalBackendConfig {
                 interface_name: "tfscale0".to_string(),
                 overlay_ip: Ipv4Addr::new(100, 64, 0, 2),
-                listen_port: 51820,
+                listen_port: 0,
             })
             .await
             .expect("local config");
@@ -662,9 +729,35 @@ mod tests {
 
         assert!(!status.healthy);
         assert!(message.contains("crypto_peers=1"));
+        assert!(message.contains("udp_bound=true"));
+        assert!(message.contains("local_endpoints=1"));
         assert!(message.contains("tun_configured=false"));
         assert!(message.contains("tun_io_ready=false"));
         assert!(message.contains("TUN setup skipped"));
+
+        cleanup_state(&state_path);
+    }
+
+    #[tokio::test]
+    async fn reports_local_udp_endpoint_after_local_config() {
+        let state_path = temp_state_path("local-endpoint");
+        let backend = test_backend(&state_path);
+
+        backend
+            .apply_local_config(LocalBackendConfig {
+                interface_name: "tfscale0".to_string(),
+                overlay_ip: Ipv4Addr::new(100, 64, 0, 2),
+                listen_port: 0,
+            })
+            .await
+            .expect("local config");
+
+        let endpoints = backend.local_endpoints().await.expect("local endpoints");
+
+        assert_eq!(endpoints.len(), 1);
+        assert_eq!(endpoints[0].kind, EndpointKind::Lan);
+        assert_eq!(endpoints[0].protocol, TransportProtocol::Udp);
+        assert_ne!(endpoints[0].port, 0);
 
         cleanup_state(&state_path);
     }
