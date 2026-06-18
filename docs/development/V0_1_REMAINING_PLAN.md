@@ -209,6 +209,9 @@ Acceptance:
 
 Goal: make v0.1 reproducible for developers and reviewers.
 
+Detailed requirements and implementation steps are tracked in
+[v0.1 Phase 7 End-to-End Validation Plan](V0_1_PHASE_7_E2E_VALIDATION_PLAN.md).
+
 Tasks:
 
 - Add a local smoke script for control plane, CLI, and one agent.
@@ -237,13 +240,13 @@ Acceptance:
 4. Linux TUN adapter.
 5. Packet framing and crypto.
 6. UDP transport on Linux.
-7. macOS TUN adapter.
-8. End-to-end validation and documentation.
+7. End-to-end validation and documentation.
+8. macOS TUN adapter and real-device parity validation.
 
 This order keeps control and agent behavior testable before platform networking
 arrives, then proves the data plane on one platform before adding the second.
 
 ## Next Immediate Task
 
-Start UDP peer transport implementation from
-[v0.1 Phase 6 UDP Peer Transport Plan](V0_1_PHASE_6_UDP_TRANSPORT_PLAN.md).
+Start end-to-end validation implementation from
+[v0.1 Phase 7 End-to-End Validation Plan](V0_1_PHASE_7_E2E_VALIDATION_PLAN.md).
