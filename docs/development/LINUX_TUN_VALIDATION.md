@@ -1,8 +1,18 @@
 # Linux TUN Validation
 
 Use this checklist on a Linux host after building `tfscale-agent` and
-`tfscaled`. It validates the Phase 4 TUN adapter without requiring packet
-encryption or UDP peer transport.
+`tfscaled`. It validates the Linux TUN adapter and, with two Linux hosts, the
+Phase 6 UDP data plane.
+
+For the scripted flow, prefer:
+
+```sh
+scripts/linux-phase6-udp-tun-check.sh single-agent
+```
+
+That validates local TUN setup, UDP bind, endpoint heartbeat publication, and
+transport runtime startup on one Linux host. Full overlay ping validation needs
+two Linux hosts because the agent currently uses the fixed `tfscale0` interface.
 
 ## Host Requirements
 
@@ -22,6 +32,39 @@ For containers, add:
 ```sh
 cargo build --workspace
 ```
+
+## Scripted Phase 6 Validation
+
+On the control host:
+
+```sh
+TFSCALE_CONTROL_LISTEN=0.0.0.0:8080 \
+TFSCALE_CONTROL_URL=http://<control-host-ip>:8080 \
+scripts/linux-phase6-udp-tun-check.sh control
+
+TFSCALE_CONTROL_URL=http://<control-host-ip>:8080 \
+scripts/linux-phase6-udp-tun-check.sh make-key
+
+TFSCALE_CONTROL_URL=http://<control-host-ip>:8080 \
+scripts/linux-phase6-udp-tun-check.sh make-key
+```
+
+On each agent host, use one key:
+
+```sh
+sudo TFSCALE_CONTROL_URL=http://<control-host-ip>:8080 \
+  scripts/linux-phase6-udp-tun-check.sh agent --login-key <key>
+```
+
+Then ping the peer overlay IP:
+
+```sh
+ping -c 3 100.64.0.x
+scripts/linux-phase6-udp-tun-check.sh status
+```
+
+Expected backend status includes `tun_configured=true`, `udp_bound=true`,
+`transport_running=true`, and nonzero `tx_packets` / `rx_packets` after ping.
 
 ## Start Control Plane
 
