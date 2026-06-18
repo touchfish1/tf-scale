@@ -28,7 +28,10 @@
 - `hostname.mesh` resolution.
 - Device deletion and revocation.
 
-## v0.3: Connectivity Probing
+## v0.3-v0.4: Connectivity Probing and Relay Fallback
+
+Detailed design:
+[v0.2 Connectivity and Relay Plan](V0_2_CONNECTIVITY_RELAY_PLAN.md).
 
 - Endpoint discovery.
 - LAN endpoint reporting.
@@ -36,9 +39,6 @@
 - Basic STUN-like probing.
 - Peer map endpoint ranking.
 - Agent status diagnostics.
-
-## v0.4: Relay Fallback
-
 - Relay service.
 - Agent-to-relay TLS connection.
 - Encrypted packet relay.

@@ -50,13 +50,17 @@ The peer map contains:
 ## Direct Connection Attempt
 
 ```text
-Agent A                                        Agent B
-  |                                               |
-  | backend handshake to LAN endpoint ----------> |
-  | backend handshake to public endpoint -------> |
-  | <------------ backend response if reachable  |
-  |                                               |
-  | direct encrypted tunnel established           |
+Agent A                     Control Plane / Probe                     Agent B
+  |                                  |                                  |
+  | UDP probe ---------------------> |                                  |
+  | <------ observed public endpoint|                                  |
+  | heartbeat + endpoints --------> | <-------- heartbeat + endpoints  |
+  | <------------ peer map with endpoint candidates -----------------> |
+  |                                                                     |
+  |==== authenticated UDP probe to LAN/public endpoints ==============>|
+  |<=== authenticated UDP probe response if NAT permits ===============|
+  |                                                                     |
+  | direct encrypted tunnel established                                 |
 ```
 
 Connection preference:
@@ -66,19 +70,26 @@ Connection preference:
 3. IPv6 endpoint.
 4. Relay fallback.
 
+Endpoint discovery and relay fallback are detailed in
+[v0.2 Connectivity and Relay Plan](../development/V0_2_CONNECTIVITY_RELAY_PLAN.md).
+
 ## Relay Fallback
 
 ```text
 Agent A                  Relay Service                  Agent B
   |                            |                            |
-  | TLS connection ----------> | <---------- TLS connection |
-  | encrypted backend packet ->|                            |
-  |                            | -> encrypted backend packet |
+  | TLS/WebSocket connection ->|<- TLS/WebSocket connection |
+  | register device session -> | <- register device session |
+  | encrypted backend frame -->|                            |
+  |                            | --> encrypted backend frame |
   |                            |                            |
 ```
 
 The relay forwards encrypted backend packets only. It cannot inspect user
 traffic.
+
+Agents continue direct probing while using relay. If a direct path becomes
+healthy, packet routing switches back from relay to direct.
 
 ## Hostname Resolution
 
