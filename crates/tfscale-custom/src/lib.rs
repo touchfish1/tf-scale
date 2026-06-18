@@ -4,7 +4,7 @@ use serde::{Deserialize, Serialize};
 use std::{
     collections::HashMap,
     fs,
-    net::{Ipv4Addr, SocketAddr},
+    net::{IpAddr, Ipv4Addr, SocketAddr},
     path::{Path, PathBuf},
     sync::{
         Arc, Mutex,
@@ -15,8 +15,8 @@ use std::{
 };
 use tfscale_net::{
     BackendCapabilities, BackendCredential, BackendError, BackendStatus, BackendType, Endpoint,
-    EndpointKind, LocalBackendConfig, NetworkBackend, PeerConfig, PublicEndpointProbe, Result,
-    TransportProtocol,
+    EndpointKind, LocalBackendConfig, NetworkBackend, PeerConfig, PublicEndpointProbe, RelayConfig,
+    Result, TransportProtocol,
 };
 use uuid::Uuid;
 use x25519_dalek::{PublicKey, StaticSecret};
@@ -302,6 +302,7 @@ struct RuntimeState {
     peer_device_by_frame_id: HashMap<FrameDeviceId, String>,
     peer_transport_sessions_by_device: HashMap<String, PeerTransportSession>,
     peer_path_state_by_device: HashMap<String, PeerPathState>,
+    relays: Vec<RelayConfig>,
     tun_status: Option<TunStatus>,
     tun_device: Option<TunDevice>,
     transport: Option<TransportRuntime>,
@@ -411,6 +412,7 @@ impl RuntimeState {
             peer_device_by_frame_id,
             peer_transport_sessions_by_device,
             peer_path_state_by_device,
+            relays: Vec::new(),
             tun_status: None,
             tun_device: None,
             transport: None,
@@ -605,8 +607,13 @@ impl RuntimeState {
                 state.failures = state.failures.saturating_add(1);
             }
             if state.failures >= DIRECT_PROBE_FAILURE_THRESHOLD {
-                state.current_path = PeerPathKind::Unknown;
-                state.active_endpoint = None;
+                if self.relays.is_empty() {
+                    state.current_path = PeerPathKind::Unknown;
+                    state.active_endpoint = None;
+                } else {
+                    state.current_path = PeerPathKind::Relay;
+                    state.active_endpoint = Some(relay_endpoint(&self.relays[0]));
+                }
                 state.rtt_ms = None;
             }
         }
@@ -812,6 +819,15 @@ fn direct_path_status(peer_paths: &HashMap<String, PeerPathState>) -> String {
     }
 }
 
+fn relay_endpoint(_relay: &RelayConfig) -> Endpoint {
+    Endpoint {
+        kind: EndpointKind::Relay,
+        address: IpAddr::from(Ipv4Addr::UNSPECIFIED),
+        port: 0,
+        protocol: TransportProtocol::Tcp,
+    }
+}
+
 fn default_state_path() -> PathBuf {
     std::env::var_os("HOME")
         .map(PathBuf::from)
@@ -1012,6 +1028,14 @@ impl NetworkBackend for CustomBackend {
         }
     }
 
+    async fn apply_relay_map(&self, relays: Vec<RelayConfig>) -> Result<()> {
+        self.state
+            .lock()
+            .map_err(|error| BackendError::CommandFailed(error.to_string()))?
+            .relays = relays;
+        Ok(())
+    }
+
     async fn apply_peer_map(&self, peers: Vec<PeerConfig>) -> Result<()> {
         let mut state = self.load_state()?;
         state.peers = peers
@@ -1094,8 +1118,12 @@ impl NetworkBackend for CustomBackend {
             .values()
             .filter(|state| state.current_path == PeerPathKind::Direct)
             .count();
+        let relay_peers = peer_path_state_by_device
+            .values()
+            .filter(|state| state.current_path == PeerPathKind::Relay)
+            .count();
         let direct_paths = direct_path_status(&peer_path_state_by_device);
-        let reachable_peers = direct_peers;
+        let reachable_peers = direct_peers + relay_peers;
         Ok(BackendStatus {
             backend_type: self.backend_type(),
             interface_name: self.interface_name.clone(),
@@ -1104,7 +1132,7 @@ impl NetworkBackend for CustomBackend {
                 && transport_status.udp_bound
                 && transport_running,
             message: Some(format!(
-                "custom backend state: credentials={} local_config={} peers={} peer_indexes=device:{} overlay:{} crypto_peers={} udp_bound={} transport_running={} local_endpoints={} transport_peers={} transport_sessions={} direct_peers={} direct_paths={} reachable_peers={} tx_packets={} rx_packets={} tx_drops={} rx_drops={} tun_configured={} tun_io_ready={} tun_message={} data_plane=transport_ready",
+                "custom backend state: credentials={} local_config={} peers={} peer_indexes=device:{} overlay:{} crypto_peers={} udp_bound={} transport_running={} local_endpoints={} transport_peers={} transport_sessions={} direct_peers={} relay_peers={} direct_paths={} reachable_peers={} tx_packets={} rx_packets={} tx_drops={} rx_drops={} tun_configured={} tun_io_ready={} tun_message={} data_plane=transport_ready",
                 has_credentials,
                 has_local_config,
                 runtime.persisted.peers.len(),
@@ -1117,6 +1145,7 @@ impl NetworkBackend for CustomBackend {
                 transport_peers,
                 transport_sessions,
                 direct_peers,
+                relay_peers,
                 direct_paths,
                 reachable_peers,
                 transport_status.tx_packets,
@@ -1696,6 +1725,41 @@ mod tests {
         assert_eq!(state.current_path, PeerPathKind::Unknown);
         assert_eq!(state.active_endpoint, None);
         assert_eq!(state.rtt_ms, None);
+    }
+
+    #[test]
+    fn stale_direct_path_falls_back_to_relay_when_available() {
+        let device_id = "dev_peer".to_string();
+        let mut runtime = RuntimeState {
+            relays: vec![RelayConfig {
+                relay_id: "relay_1".to_string(),
+                url: "tcp://127.0.0.1:9443".to_string(),
+                region: "local".to_string(),
+            }],
+            ..RuntimeState::default()
+        };
+        runtime.peer_path_state_by_device.insert(
+            device_id.clone(),
+            PeerPathState {
+                current_path: PeerPathKind::Direct,
+                active_endpoint: Some(endpoint(Ipv4Addr::LOCALHOST, 51820)),
+                last_success_at: Some(SystemTime::now() - DIRECT_PROBE_STALE_AFTER),
+                failures: DIRECT_PROBE_FAILURE_THRESHOLD - 1,
+                ..PeerPathState::default()
+            },
+        );
+
+        runtime.expire_stale_direct_paths(SystemTime::now());
+
+        let state = runtime
+            .peer_path_state_by_device
+            .get(&device_id)
+            .expect("peer state");
+        assert_eq!(state.current_path, PeerPathKind::Relay);
+        assert_eq!(
+            state.active_endpoint.as_ref().expect("relay endpoint").kind,
+            EndpointKind::Relay
+        );
     }
 
     #[test]

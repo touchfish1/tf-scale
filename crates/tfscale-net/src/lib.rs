@@ -98,6 +98,13 @@ pub struct PeerConfig {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct RelayConfig {
+    pub relay_id: String,
+    pub url: String,
+    pub region: String,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct BackendStatus {
     pub backend_type: BackendType,
     pub interface_name: String,
@@ -117,6 +124,7 @@ pub trait NetworkBackend: Send + Sync {
 
     async fn ensure_credentials(&self) -> Result<BackendCredential>;
     async fn apply_local_config(&self, config: LocalBackendConfig) -> Result<()>;
+    async fn apply_relay_map(&self, relays: Vec<RelayConfig>) -> Result<()>;
     async fn apply_peer_map(&self, peers: Vec<PeerConfig>) -> Result<()>;
     async fn local_endpoints(&self) -> Result<Vec<Endpoint>>;
     async fn probe_public_endpoint(
@@ -147,6 +155,7 @@ pub mod testing {
     pub struct MockBackendState {
         pub ensure_credentials_calls: usize,
         pub local_configs: Vec<LocalBackendConfig>,
+        pub relay_maps: Vec<Vec<RelayConfig>>,
         pub peer_maps: Vec<Vec<PeerConfig>>,
         pub maintain_peer_paths_calls: usize,
         pub shutdown_calls: usize,
@@ -203,6 +212,15 @@ pub mod testing {
                 .expect("mock backend state lock")
                 .local_configs
                 .push(config);
+            Ok(())
+        }
+
+        async fn apply_relay_map(&self, relays: Vec<RelayConfig>) -> Result<()> {
+            self.state
+                .lock()
+                .expect("mock backend state lock")
+                .relay_maps
+                .push(relays);
             Ok(())
         }
 

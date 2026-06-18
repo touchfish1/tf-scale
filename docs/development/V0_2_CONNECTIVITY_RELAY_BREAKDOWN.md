@@ -198,8 +198,8 @@ session、frame source/destination 和 nonce replay window。
 
 状态：`tfscale-relay` crate、JSON Lines relay 协议、session register、按目标
 device 转发 encrypted frame、unknown destination drop/error、control 静态 relay
-metadata 和 network map relays 字段已实现。agent/backend relay transport 和
-direct 失败后的 fallback 仍待实现。
+metadata、network map relays 字段、agent relay map 下发到 backend、backend relay
+fallback path state 已实现。backend TCP relay transport 和 relay data frame 发送仍待实现。
 
 ### 目标
 
@@ -245,8 +245,9 @@ crates/tfscale-relay/
 ### Agent/Backend
 
 - agent 从 network map 获取 relay metadata。
-- backend 建立 relay transport。
-- direct path unavailable 时，data frame 走 relay。
+- backend 建立 relay transport：待实现。
+- direct path unavailable 时，data frame 走 relay：path state fallback 已实现，
+  实际 relay frame 发送待实现。
 - relay 路径不阻塞 direct probe，后台持续尝试 direct。
 
 ### 测试
@@ -255,6 +256,7 @@ crates/tfscale-relay/
 - relay frame route 到目标 session：已覆盖。
 - unknown destination 返回 drop/error：已覆盖。
 - direct failure 后选择 relay。
+- direct failure 后选择 relay：path state 已覆盖。
 - direct 恢复后切回 direct。
 
 ### 验收

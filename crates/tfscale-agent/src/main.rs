@@ -16,7 +16,7 @@ use tfscale_core::protocol::{
 use tfscale_custom::CustomBackend;
 use tfscale_net::{
     BackendCredential, Endpoint, EndpointKind, LocalBackendConfig, NetworkBackend, PeerConfig,
-    TransportProtocol,
+    RelayConfig, TransportProtocol,
 };
 use tracing::{info, warn};
 use uuid::Uuid;
@@ -500,10 +500,27 @@ async fn apply_network_map_to_backend(
         })
         .await?;
     backend
+        .apply_relay_map(network_map_to_relay_configs(network_map.relays))
+        .await?;
+    backend
         .apply_peer_map(network_map_to_peer_configs(network_map.peers)?)
         .await?;
 
     Ok(())
+}
+
+fn network_map_to_relay_configs(
+    relays: Vec<tfscale_core::protocol::RelayMetadata>,
+) -> Vec<RelayConfig> {
+    relays
+        .into_iter()
+        .filter(|relay| relay.healthy)
+        .map(|relay| RelayConfig {
+            relay_id: relay.relay_id,
+            url: relay.url,
+            region: relay.region,
+        })
+        .collect()
 }
 
 fn network_map_to_peer_configs(peers: Vec<NetworkMapPeer>) -> Result<Vec<PeerConfig>> {
@@ -724,6 +741,42 @@ mod tests {
         assert_eq!(snapshot.peer_maps.len(), 1);
         assert_eq!(snapshot.peer_maps[0][0].device_id.as_str(), "dev_peer");
         assert_eq!(snapshot.peer_maps[0][0].hostname, "peer");
+        assert_eq!(snapshot.relay_maps.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn applies_relay_map_to_backend() {
+        let backend = MockBackend::new("mock-public-key");
+        let state = AgentState {
+            device_id: Some("dev_self".to_string()),
+            ipv4: Some("100.64.0.2".to_string()),
+            ..AgentState::new()
+        };
+        let mut network_map = network_map_with_version(1);
+        network_map.relays = vec![
+            tfscale_core::protocol::RelayMetadata {
+                relay_id: "relay_1".to_string(),
+                url: "tcp://127.0.0.1:9443".to_string(),
+                region: "local".to_string(),
+                healthy: true,
+            },
+            tfscale_core::protocol::RelayMetadata {
+                relay_id: "relay_down".to_string(),
+                url: "tcp://127.0.0.1:9444".to_string(),
+                region: "local".to_string(),
+                healthy: false,
+            },
+        ];
+
+        apply_network_map_to_backend(&backend, &state, network_map)
+            .await
+            .expect("apply network map");
+
+        let snapshot = backend.snapshot();
+        assert_eq!(snapshot.relay_maps.len(), 1);
+        assert_eq!(snapshot.relay_maps[0].len(), 1);
+        assert_eq!(snapshot.relay_maps[0][0].relay_id, "relay_1");
+        assert_eq!(snapshot.relay_maps[0][0].url, "tcp://127.0.0.1:9443");
     }
 
     #[tokio::test]
