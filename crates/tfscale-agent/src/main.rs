@@ -325,9 +325,14 @@ async fn apply_network_map_to_backend(
         .context("agent state is missing assigned overlay IP")?
         .parse::<Ipv4Addr>()
         .context("agent state contains invalid overlay IP")?;
+    let device_id = state
+        .device_id
+        .clone()
+        .context("agent state is missing device ID")?;
 
     backend
         .apply_local_config(LocalBackendConfig {
+            device_id,
             interface_name: DEFAULT_INTERFACE_NAME.to_string(),
             overlay_ip,
             listen_port: DEFAULT_LISTEN_PORT,
@@ -518,6 +523,7 @@ mod tests {
     async fn applies_network_map_to_backend() {
         let backend = MockBackend::new("mock-public-key");
         let state = AgentState {
+            device_id: Some("dev_self".to_string()),
             ipv4: Some("100.64.0.2".to_string()),
             ..AgentState::new()
         };
@@ -564,6 +570,7 @@ mod tests {
     async fn skips_unchanged_network_map_version() {
         let backend = MockBackend::new("mock-public-key");
         let state = AgentState {
+            device_id: Some("dev_self".to_string()),
             ipv4: Some("100.64.0.2".to_string()),
             ..AgentState::new()
         };
@@ -588,6 +595,7 @@ mod tests {
     async fn applies_changed_network_map_version() {
         let backend = MockBackend::new("mock-public-key");
         let state = AgentState {
+            device_id: Some("dev_self".to_string()),
             ipv4: Some("100.64.0.2".to_string()),
             ..AgentState::new()
         };

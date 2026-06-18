@@ -31,10 +31,15 @@ Implemented in the current development branch:
   count, and packet counters.
 - `packet.rs` parses IPv4 destinations for later TUN-to-peer routing.
 - `transport.rs` can send and receive UDP frames on loopback in tests.
+- Local config now carries the local device ID so transport sessions can use
+  real control-plane frame IDs.
+- Peer map application builds `PeerCryptoSession` values for peers with valid
+  device IDs, credentials, and LAN UDP endpoints.
+- `transport.rs` can send and receive encrypted synthetic IP packets over
+  loopback UDP in tests.
 
 Still remaining:
 
-- Build full `PeerCryptoSession` values from real local/peer frame IDs.
 - Route TUN packets through crypto sessions to selected UDP endpoints.
 - Decrypt received UDP frames and write plaintext packets back to TUN.
 - Add transport task lifecycle and cancellation around the blocking TUN loop.
@@ -249,9 +254,10 @@ Manual validation:
 5. Build peer endpoint selection and transport status structs.
 6. Add synthetic UDP transport tests using loopback sockets.
 7. Construct `PeerCryptoSession` values from local identity and peer map.
-8. Connect TUN read/write loops behind runtime start/stop.
-9. Update backend status and shutdown cleanup.
-10. Add Linux manual validation notes for UDP traffic.
+8. Add encrypted synthetic packet send/receive tests over loopback UDP.
+9. Connect TUN read/write loops behind runtime start/stop.
+10. Update backend status and shutdown cleanup.
+11. Add Linux manual validation notes for UDP traffic.
 
 ## Acceptance Criteria
 

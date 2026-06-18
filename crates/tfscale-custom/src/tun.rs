@@ -153,6 +153,7 @@ mod tests {
     #[test]
     fn builds_tun_config_from_local_backend_config() {
         let config = TunConfig::from_local_config(&LocalBackendConfig {
+            device_id: "dev_test".to_string(),
             interface_name: "tfscale0".to_string(),
             overlay_ip: Ipv4Addr::new(100, 64, 0, 2),
             listen_port: 51820,

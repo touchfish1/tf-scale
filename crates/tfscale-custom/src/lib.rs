@@ -24,7 +24,8 @@ mod platform;
 mod transport;
 mod tun;
 
-use crypto::decode_public_credential;
+use crypto::{PeerCryptoSession, decode_public_credential};
+use frame::FrameDeviceId;
 use transport::{TransportRuntime, select_udp_endpoint};
 use tun::{TunConfig, TunDevice, TunStatus};
 
@@ -202,6 +203,7 @@ struct RuntimeState {
     peers_by_overlay_ip: HashMap<Ipv4Addr, String>,
     peer_crypto_material_by_device: HashMap<String, PeerCryptoMaterial>,
     peer_udp_endpoints_by_device: HashMap<String, Endpoint>,
+    peer_transport_sessions_by_device: HashMap<String, PeerTransportSession>,
     tun_status: Option<TunStatus>,
     tun_device: Option<TunDevice>,
     transport: Option<TransportRuntime>,
@@ -211,6 +213,15 @@ struct RuntimeState {
 struct PeerCryptoMaterial {
     #[allow(dead_code)]
     public_key: [u8; 32],
+}
+
+struct PeerTransportSession {
+    #[allow(dead_code)]
+    overlay_ip: Ipv4Addr,
+    #[allow(dead_code)]
+    endpoint: Endpoint,
+    #[allow(dead_code)]
+    crypto: PeerCryptoSession,
 }
 
 impl RuntimeState {
@@ -242,6 +253,8 @@ impl RuntimeState {
                     .map(|endpoint| (peer.device_id.clone(), endpoint))
             })
             .collect();
+        let peer_transport_sessions_by_device =
+            build_peer_transport_sessions(&persisted).unwrap_or_default();
 
         Self {
             persisted,
@@ -249,11 +262,51 @@ impl RuntimeState {
             peers_by_overlay_ip,
             peer_crypto_material_by_device,
             peer_udp_endpoints_by_device,
+            peer_transport_sessions_by_device,
             tun_status: None,
             tun_device: None,
             transport: None,
         }
     }
+}
+
+fn build_peer_transport_sessions(
+    persisted: &CustomBackendState,
+) -> Result<HashMap<String, PeerTransportSession>> {
+    let Some(identity) = persisted.identity.as_ref() else {
+        return Ok(HashMap::new());
+    };
+    let Some(local_config) = persisted.local_config.as_ref() else {
+        return Ok(HashMap::new());
+    };
+
+    let local_id = FrameDeviceId::from_device_id(&local_config.device_id)?;
+    let local_private_key = decode_key(&identity.private_key)?;
+    let mut sessions = HashMap::new();
+
+    for peer in &persisted.peers {
+        let peer_id = FrameDeviceId::from_device_id(&peer.device_id)?;
+        let Some(endpoint) = select_udp_endpoint(&peer.endpoints) else {
+            continue;
+        };
+        let crypto = PeerCryptoSession::new(
+            local_private_key,
+            &identity.public_key,
+            &peer.public_key,
+            local_id,
+            peer_id,
+        )?;
+        sessions.insert(
+            peer.device_id.clone(),
+            PeerTransportSession {
+                overlay_ip: peer.overlay_ip,
+                endpoint,
+                crypto,
+            },
+        );
+    }
+
+    Ok(sessions)
 }
 
 fn default_state_path() -> PathBuf {
@@ -499,13 +552,14 @@ impl NetworkBackend for CustomBackend {
             .map(TransportRuntime::status)
             .unwrap_or_default();
         let transport_peers = runtime.peer_udp_endpoints_by_device.len();
+        let transport_sessions = runtime.peer_transport_sessions_by_device.len();
         let reachable_peers = transport_peers;
         Ok(BackendStatus {
             backend_type: self.backend_type(),
             interface_name: self.interface_name.clone(),
             healthy: tun_configured && tun_io_ready && transport_status.udp_bound,
             message: Some(format!(
-                "custom backend state: credentials={} local_config={} peers={} peer_indexes=device:{} overlay:{} crypto_peers={} udp_bound={} local_endpoints={} transport_peers={} reachable_peers={} tx_packets={} rx_packets={} tx_drops={} rx_drops={} tun_configured={} tun_io_ready={} tun_message={} data_plane=transport_ready",
+                "custom backend state: credentials={} local_config={} peers={} peer_indexes=device:{} overlay:{} crypto_peers={} udp_bound={} local_endpoints={} transport_peers={} transport_sessions={} reachable_peers={} tx_packets={} rx_packets={} tx_drops={} rx_drops={} tun_configured={} tun_io_ready={} tun_message={} data_plane=transport_ready",
                 has_credentials,
                 has_local_config,
                 runtime.persisted.peers.len(),
@@ -515,6 +569,7 @@ impl NetworkBackend for CustomBackend {
                 transport_status.udp_bound,
                 transport_status.local_endpoints,
                 transport_peers,
+                transport_sessions,
                 reachable_peers,
                 transport_status.tx_packets,
                 transport_status.rx_packets,
@@ -603,6 +658,7 @@ mod tests {
             .expect("backend credentials");
         backend
             .apply_local_config(LocalBackendConfig {
+                device_id: DeviceId::new().to_string(),
                 interface_name: "tfscale0".to_string(),
                 overlay_ip: Ipv4Addr::new(100, 64, 0, 2),
                 listen_port: 0,
@@ -713,6 +769,7 @@ mod tests {
 
         backend
             .apply_local_config(LocalBackendConfig {
+                device_id: DeviceId::new().to_string(),
                 interface_name: "tfscale0".to_string(),
                 overlay_ip: Ipv4Addr::new(100, 64, 0, 2),
                 listen_port: 0,
@@ -745,6 +802,7 @@ mod tests {
 
         backend
             .apply_local_config(LocalBackendConfig {
+                device_id: DeviceId::new().to_string(),
                 interface_name: "tfscale0".to_string(),
                 overlay_ip: Ipv4Addr::new(100, 64, 0, 2),
                 listen_port: 0,
@@ -758,6 +816,44 @@ mod tests {
         assert_eq!(endpoints[0].kind, EndpointKind::Lan);
         assert_eq!(endpoints[0].protocol, TransportProtocol::Udp);
         assert_ne!(endpoints[0].port, 0);
+
+        cleanup_state(&state_path);
+    }
+
+    #[tokio::test]
+    async fn builds_transport_session_for_peer_with_udp_endpoint() {
+        let state_path = temp_state_path("transport-session");
+        let backend = test_backend(&state_path);
+        let local_device_id = DeviceId::new().to_string();
+        let peer_device_id = DeviceId::new().to_string();
+
+        backend
+            .ensure_credentials()
+            .await
+            .expect("backend credentials");
+        backend
+            .apply_local_config(LocalBackendConfig {
+                device_id: local_device_id,
+                interface_name: "tfscale0".to_string(),
+                overlay_ip: Ipv4Addr::new(100, 64, 0, 2),
+                listen_port: 0,
+            })
+            .await
+            .expect("local config");
+        backend
+            .apply_peer_map(vec![test_peer_with_endpoint(
+                &peer_device_id,
+                Ipv4Addr::new(100, 64, 0, 3),
+                endpoint(Ipv4Addr::LOCALHOST, 51820),
+            )])
+            .await
+            .expect("peer map");
+
+        let status = backend.status().await.expect("backend status");
+        let message = status.message.expect("status message");
+
+        assert!(message.contains("transport_peers=1"));
+        assert!(message.contains("transport_sessions=1"));
 
         cleanup_state(&state_path);
     }
@@ -805,6 +901,26 @@ mod tests {
             },
             endpoints: Vec::new(),
             allowed_routes: vec![format!("{overlay_ip}/32")],
+        }
+    }
+
+    fn test_peer_with_endpoint(
+        device_id: &str,
+        overlay_ip: Ipv4Addr,
+        endpoint: Endpoint,
+    ) -> PeerConfig {
+        PeerConfig {
+            endpoints: vec![endpoint],
+            ..test_peer(device_id, overlay_ip)
+        }
+    }
+
+    fn endpoint(address: Ipv4Addr, port: u16) -> Endpoint {
+        Endpoint {
+            kind: EndpointKind::Lan,
+            address: IpAddr::from(address),
+            port,
+            protocol: TransportProtocol::Udp,
         }
     }
 }

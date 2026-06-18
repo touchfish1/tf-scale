@@ -54,6 +54,7 @@ pub struct BackendCredential {
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct LocalBackendConfig {
+    pub device_id: String,
     pub interface_name: String,
     pub overlay_ip: Ipv4Addr,
     pub listen_port: u16,
