@@ -3,10 +3,12 @@
 use crate::crypto::PeerCryptoSession;
 use std::{
     net::{IpAddr, Ipv4Addr, SocketAddr, UdpSocket},
-    time::SystemTime,
+    time::{Duration, Instant, SystemTime},
 };
-use tfscale_net::{BackendError, Result};
+use tfscale_net::{BackendError, PublicEndpointProbe, Result};
 use tfscale_net::{Endpoint, EndpointKind, TransportProtocol};
+
+pub(crate) const PUBLIC_ENDPOINT_PROBE_REQUEST: &[u8] = b"tfscale-public-probe-v1";
 
 #[derive(Debug)]
 pub(crate) struct TransportRuntime {
@@ -123,6 +125,54 @@ impl TransportRuntime {
             .local_addr()
             .map_err(|error| BackendError::CommandFailed(error.to_string()))
     }
+
+    pub fn probe_public_endpoint(
+        &mut self,
+        probe_server: SocketAddr,
+        timeout: Duration,
+    ) -> Result<Option<PublicEndpointProbe>> {
+        self.send_probe_request(probe_server)?;
+
+        let deadline = Instant::now() + timeout;
+        let mut buffer = [0u8; 256];
+        loop {
+            match self.socket.recv_from(&mut buffer) {
+                Ok((received, source)) if source == probe_server => {
+                    self.status.rx_packets += 1;
+                    return decode_probe_response(&buffer[..received]);
+                }
+                Ok((_received, _source)) => {
+                    self.status.rx_packets += 1;
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                    if Instant::now() >= deadline {
+                        return Ok(None);
+                    }
+                    std::thread::sleep(Duration::from_millis(10));
+                }
+                Err(error) => {
+                    self.status.rx_drops += 1;
+                    return Err(BackendError::CommandFailed(error.to_string()));
+                }
+            }
+        }
+    }
+
+    fn send_probe_request(&mut self, probe_server: SocketAddr) -> Result<()> {
+        match self
+            .socket
+            .send_to(PUBLIC_ENDPOINT_PROBE_REQUEST, probe_server)
+        {
+            Ok(_) => {
+                self.status.tx_packets += 1;
+                Ok(())
+            }
+            Err(error) => {
+                self.status.tx_drops += 1;
+                Err(BackendError::CommandFailed(error.to_string()))
+            }
+        }
+    }
 }
 
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
@@ -166,6 +216,46 @@ fn discover_lan_ipv4() -> Option<Ipv4Addr> {
         IpAddr::V4(address) if !address.is_unspecified() => Some(address),
         _ => None,
     }
+}
+
+pub(crate) fn encode_probe_response(observed: SocketAddr) -> Vec<u8> {
+    format!(
+        "tfscale-public-probe-v1 {} {}",
+        observed.ip(),
+        observed.port()
+    )
+    .into_bytes()
+}
+
+fn decode_probe_response(bytes: &[u8]) -> Result<Option<PublicEndpointProbe>> {
+    let text = std::str::from_utf8(bytes)
+        .map_err(|error| BackendError::CommandFailed(error.to_string()))?;
+    let mut parts = text.split_whitespace();
+    if parts.next() != Some("tfscale-public-probe-v1") {
+        return Ok(None);
+    }
+
+    let Some(address) = parts.next() else {
+        return Ok(None);
+    };
+    let Some(port) = parts.next() else {
+        return Ok(None);
+    };
+    let address = address
+        .parse()
+        .map_err(|error| BackendError::CommandFailed(format!("invalid probe address: {error}")))?;
+    let port = port
+        .parse()
+        .map_err(|error| BackendError::CommandFailed(format!("invalid probe port: {error}")))?;
+
+    Ok(Some(PublicEndpointProbe {
+        observed_endpoint: Endpoint {
+            kind: EndpointKind::Public,
+            address,
+            port,
+            protocol: TransportProtocol::Udp,
+        },
+    }))
 }
 
 #[cfg(test)]
@@ -245,6 +335,50 @@ mod tests {
         assert_eq!(&buffer[..received], b"tfscale-frame");
         assert_eq!(left.status().tx_packets, 1);
         assert_eq!(right.status().rx_packets, 1);
+    }
+
+    #[test]
+    fn probes_public_endpoint_on_loopback() {
+        let mut client = TransportRuntime::bind(0).expect("client runtime");
+        let server = UdpSocket::bind(SocketAddr::from((Ipv4Addr::LOCALHOST, 0))).expect("server");
+        server.set_nonblocking(true).expect("nonblocking server");
+        let server_addr = server.local_addr().expect("server addr");
+
+        let handle = std::thread::spawn(move || {
+            let mut buffer = [0u8; 256];
+            for _ in 0..10 {
+                match server.recv_from(&mut buffer) {
+                    Ok((received, source)) => {
+                        assert_eq!(&buffer[..received], PUBLIC_ENDPOINT_PROBE_REQUEST);
+                        let response = encode_probe_response(source);
+                        server.send_to(&response, source).expect("send response");
+                        return;
+                    }
+                    Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                        std::thread::sleep(Duration::from_millis(10));
+                    }
+                    Err(error) => panic!("server receive failed: {error}"),
+                }
+            }
+            panic!("probe request not received");
+        });
+
+        let probe = client
+            .probe_public_endpoint(server_addr, Duration::from_secs(1))
+            .expect("probe")
+            .expect("observed endpoint");
+        handle.join().expect("server thread");
+
+        assert_eq!(probe.observed_endpoint.kind, EndpointKind::Public);
+        assert_eq!(probe.observed_endpoint.protocol, TransportProtocol::Udp);
+        assert_eq!(
+            probe.observed_endpoint.address,
+            IpAddr::V4(Ipv4Addr::LOCALHOST)
+        );
+        assert_eq!(
+            probe.observed_endpoint.port,
+            client.local_addr().expect("client addr").port()
+        );
     }
 
     #[test]

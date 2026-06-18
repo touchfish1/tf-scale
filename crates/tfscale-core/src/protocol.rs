@@ -90,6 +90,10 @@ pub struct EndpointProbeResponse {
     pub observed_address: String,
     pub observed_port: u16,
     pub protocol: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub udp_probe_address: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub udp_probe_port: Option<u16>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]

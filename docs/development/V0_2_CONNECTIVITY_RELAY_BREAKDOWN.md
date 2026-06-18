@@ -15,9 +15,8 @@
 ## Phase 1：Endpoint Discovery
 
 状态：协议字段、endpoint metadata migration、heartbeat 存储、peer map 过期过滤、
-HTTP endpoint-probe API、agent 自动调用 probe 并上报 public endpoint 已实现。
-当前 probe 是 control plane 观察到的 HTTP remote endpoint，真实 UDP/STUN probe
-仍待实现。
+HTTP endpoint-probe discovery API、control UDP probe listener、agent 通过 backend
+UDP socket 自动探测并上报 public endpoint 已实现。
 
 ### 目标
 
@@ -71,14 +70,22 @@ POST /v1/agent/endpoint-probe
 {
   "observed_address": "203.0.113.10",
   "observed_port": 49201,
-  "protocol": "udp"
+  "protocol": "udp",
+  "udp_probe_address": "203.0.113.10",
+  "udp_probe_port": 3478
 }
 ```
+
+说明：`observed_*` 保留为 HTTP fallback；agent 优先使用 `udp_probe_*`，让
+`tfscale-custom` 通过当前 backend UDP socket 发送 probe，避免另开 socket
+导致 NAT 映射端口不一致。
 
 ### Agent 改动
 
 - `tfscale-agent` 在 heartbeat 前调用 discovery。
 - `tfscale-custom::local_endpoints()` 继续报告 LAN UDP endpoint。
+- `tfscale-custom::probe_public_endpoint()` 使用 backend 已绑定的 UDP socket
+  向 control UDP probe listener 发包并解析观察结果。
 - agent 将 LAN endpoint 与 public endpoint 合并上报。
 - public endpoint 的 port 必须来自 backend UDP socket 实际端口或 probe 观察端口。
 
@@ -86,6 +93,7 @@ POST /v1/agent/endpoint-probe
 
 - heartbeat 存储 endpoint metadata。
 - `network_map` 只下发未过期 endpoint。
+- `tfscaled serve` 默认监听 `--udp-probe-listen 127.0.0.1:3478`。
 - `network_map_version` 应考虑 endpoint 更新时间或版本，而不是只 count。
 
 ### 测试
@@ -93,7 +101,8 @@ POST /v1/agent/endpoint-probe
 - endpoint payload 向后兼容反序列化。
 - heartbeat 写入 source/priority/expires_at。
 - expired endpoint 不进入 peer map。
-- endpoint probe 返回请求来源地址。
+- HTTP endpoint-probe 返回 UDP probe 服务地址。
+- UDP endpoint probe 返回服务端观察到的 UDP 来源地址和端口。
 
 ### 验收
 

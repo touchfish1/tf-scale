@@ -1,6 +1,9 @@
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
-use std::net::{IpAddr, Ipv4Addr};
+use std::{
+    net::{IpAddr, Ipv4Addr, SocketAddr},
+    time::Duration,
+};
 use tfscale_core::DeviceId;
 
 pub type Result<T> = std::result::Result<T, BackendError>;
@@ -102,6 +105,11 @@ pub struct BackendStatus {
     pub message: Option<String>,
 }
 
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct PublicEndpointProbe {
+    pub observed_endpoint: Endpoint,
+}
+
 #[async_trait]
 pub trait NetworkBackend: Send + Sync {
     fn backend_type(&self) -> BackendType;
@@ -111,6 +119,11 @@ pub trait NetworkBackend: Send + Sync {
     async fn apply_local_config(&self, config: LocalBackendConfig) -> Result<()>;
     async fn apply_peer_map(&self, peers: Vec<PeerConfig>) -> Result<()>;
     async fn local_endpoints(&self) -> Result<Vec<Endpoint>>;
+    async fn probe_public_endpoint(
+        &self,
+        probe_server: SocketAddr,
+        timeout: Duration,
+    ) -> Result<Option<PublicEndpointProbe>>;
     async fn status(&self) -> Result<BackendStatus>;
     async fn shutdown(&self) -> Result<()>;
 }
@@ -202,6 +215,14 @@ pub mod testing {
 
         async fn local_endpoints(&self) -> Result<Vec<Endpoint>> {
             Ok(self.endpoints.clone())
+        }
+
+        async fn probe_public_endpoint(
+            &self,
+            _probe_server: SocketAddr,
+            _timeout: Duration,
+        ) -> Result<Option<PublicEndpointProbe>> {
+            Ok(None)
         }
 
         async fn status(&self) -> Result<BackendStatus> {

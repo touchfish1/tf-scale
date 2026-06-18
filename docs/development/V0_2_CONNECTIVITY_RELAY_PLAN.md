@@ -101,9 +101,15 @@ agent 从本地 UDP socket 向 control plane 或 relay 的 probe endpoint 发包
 {
   "observed_address": "203.0.113.10",
   "observed_port": 49201,
-  "protocol": "udp"
+  "protocol": "udp",
+  "udp_probe_address": "203.0.113.10",
+  "udp_probe_port": 3478
 }
 ```
+
+实现上，HTTP `endpoint-probe` 负责认证 agent 并返回 UDP probe listener 地址；
+agent 随后要求 backend 使用已绑定的数据面 UDP socket 发 probe。这样 public
+endpoint 的端口来自实际 backend UDP socket，而不是独立 HTTP/TCP 连接。
 
 agent 将以下 endpoint 上报 heartbeat：
 

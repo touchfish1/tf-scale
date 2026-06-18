@@ -3,7 +3,7 @@ use clap::{Parser, Subcommand};
 use serde::{Deserialize, Serialize};
 use std::{
     fs,
-    net::{IpAddr, Ipv4Addr},
+    net::{IpAddr, Ipv4Addr, SocketAddr},
     path::PathBuf,
     time::Duration,
 };
@@ -294,8 +294,15 @@ async fn send_heartbeat(
         .into_iter()
         .map(endpoint_to_payload)
         .collect::<Vec<_>>();
-    let endpoints =
-        discovered_endpoints(client, control_url, device_id, node_key, local_endpoints).await;
+    let endpoints = discovered_endpoints(
+        client,
+        backend,
+        control_url,
+        device_id,
+        node_key,
+        local_endpoints,
+    )
+    .await;
 
     client
         .post(format!("{control_url}/v1/agent/heartbeat"))
@@ -318,12 +325,13 @@ async fn send_heartbeat(
 
 async fn discovered_endpoints(
     client: &reqwest::Client,
+    backend: &impl NetworkBackend,
     control_url: &str,
     device_id: &str,
     node_key: &str,
     mut endpoints: Vec<EndpointPayload>,
 ) -> Vec<EndpointPayload> {
-    match probe_public_endpoint(client, control_url, device_id, node_key).await {
+    match probe_public_endpoint(client, backend, control_url, device_id, node_key).await {
         Ok(Some(endpoint)) => endpoints.push(endpoint),
         Ok(None) => {}
         Err(error) => warn!(%error, "endpoint probe failed"),
@@ -334,6 +342,7 @@ async fn discovered_endpoints(
 
 async fn probe_public_endpoint(
     client: &reqwest::Client,
+    backend: &impl NetworkBackend,
     control_url: &str,
     device_id: &str,
     node_key: &str,
@@ -351,7 +360,39 @@ async fn probe_public_endpoint(
         .json()
         .await?;
 
+    if let Some(probe_server) = udp_probe_server(&response)? {
+        if let Some(probe) = backend
+            .probe_public_endpoint(probe_server, Duration::from_secs(1))
+            .await?
+        {
+            return Ok(Some(endpoint_from_backend_probe(probe.observed_endpoint)));
+        }
+    }
+
     Ok(endpoint_from_probe_response(response))
+}
+
+fn udp_probe_server(response: &EndpointProbeResponse) -> Result<Option<SocketAddr>> {
+    let Some(address) = response.udp_probe_address.as_ref() else {
+        return Ok(None);
+    };
+    let Some(port) = response.udp_probe_port else {
+        return Ok(None);
+    };
+
+    Ok(Some(SocketAddr::new(address.parse()?, port)))
+}
+
+fn endpoint_from_backend_probe(endpoint: Endpoint) -> EndpointPayload {
+    EndpointPayload {
+        kind: endpoint_kind_to_payload(endpoint.kind).to_string(),
+        address: endpoint.address.to_string(),
+        port: endpoint.port,
+        protocol: transport_protocol_to_payload(endpoint.protocol).to_string(),
+        source: Some("stun".to_string()),
+        priority: Some(50),
+        expires_at: None,
+    }
 }
 
 fn endpoint_from_probe_response(response: EndpointProbeResponse) -> Option<EndpointPayload> {
@@ -765,6 +806,8 @@ mod tests {
             observed_address: "203.0.113.10".to_string(),
             observed_port: 49201,
             protocol: "udp".to_string(),
+            udp_probe_address: None,
+            udp_probe_port: None,
         })
         .expect("public endpoint");
 
@@ -782,9 +825,43 @@ mod tests {
             observed_address: "203.0.113.10".to_string(),
             observed_port: 0,
             protocol: "udp".to_string(),
+            udp_probe_address: None,
+            udp_probe_port: None,
         });
 
         assert!(endpoint.is_none());
+    }
+
+    #[test]
+    fn parses_udp_probe_server_from_probe_response() {
+        let server = udp_probe_server(&EndpointProbeResponse {
+            observed_address: "203.0.113.10".to_string(),
+            observed_port: 49201,
+            protocol: "udp".to_string(),
+            udp_probe_address: Some("127.0.0.1".to_string()),
+            udp_probe_port: Some(3478),
+        })
+        .expect("probe server")
+        .expect("probe server");
+
+        assert_eq!(server, "127.0.0.1:3478".parse().expect("socket addr"));
+    }
+
+    #[test]
+    fn converts_backend_probe_to_public_endpoint_payload() {
+        let endpoint = endpoint_from_backend_probe(Endpoint {
+            kind: EndpointKind::Public,
+            address: IpAddr::V4(Ipv4Addr::new(203, 0, 113, 10)),
+            port: 49201,
+            protocol: TransportProtocol::Udp,
+        });
+
+        assert_eq!(endpoint.kind, "public");
+        assert_eq!(endpoint.address, "203.0.113.10");
+        assert_eq!(endpoint.port, 49201);
+        assert_eq!(endpoint.protocol, "udp");
+        assert_eq!(endpoint.source.as_deref(), Some("stun"));
+        assert_eq!(endpoint.priority, Some(50));
     }
 
     #[test]

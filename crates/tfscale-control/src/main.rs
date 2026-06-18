@@ -19,6 +19,7 @@ use tfscale_core::{
         RenameDeviceRequest,
     },
 };
+use tokio::net::UdpSocket;
 use tracing::{info, warn};
 use uuid::Uuid;
 
@@ -56,6 +57,9 @@ enum Command {
 
         #[arg(long, default_value = "127.0.0.1:8080")]
         listen: String,
+
+        #[arg(long, default_value = "127.0.0.1:3478")]
+        udp_probe_listen: String,
     },
 }
 
@@ -65,8 +69,12 @@ async fn main() -> AnyResult<()> {
     let cli = Cli::parse();
 
     match cli.command {
-        Command::Serve { db, listen } => {
-            serve(db, listen).await?;
+        Command::Serve {
+            db,
+            listen,
+            udp_probe_listen,
+        } => {
+            serve(db, listen, udp_probe_listen).await?;
         }
     }
 
@@ -82,15 +90,21 @@ fn init_tracing() {
 #[derive(Clone)]
 struct AppState {
     pool: SqlitePool,
+    udp_probe_addr: SocketAddr,
 }
 
-async fn serve(db: String, listen: String) -> AnyResult<()> {
+async fn serve(db: String, listen: String, udp_probe_listen: String) -> AnyResult<()> {
     let database_url = format!("sqlite://{db}?mode=rwc");
     let pool = SqlitePoolOptions::new()
         .max_connections(5)
         .connect(&database_url)
         .await?;
     init_schema(&pool).await?;
+
+    let udp_probe_addr: SocketAddr = udp_probe_listen.parse()?;
+    let udp_probe_socket = UdpSocket::bind(udp_probe_addr).await?;
+    let udp_probe_addr = udp_probe_socket.local_addr()?;
+    tokio::spawn(run_udp_endpoint_probe(udp_probe_socket));
 
     let app = Router::new()
         .route("/healthz", get(healthz))
@@ -104,17 +118,41 @@ async fn serve(db: String, listen: String) -> AnyResult<()> {
         .route("/v1/agent/heartbeat", post(heartbeat))
         .route("/v1/agent/network-map", get(network_map))
         .route("/v1/agent/endpoint-probe", post(endpoint_probe))
-        .with_state(AppState { pool });
+        .with_state(AppState {
+            pool,
+            udp_probe_addr,
+        });
 
     let addr: SocketAddr = listen.parse()?;
     let listener = tokio::net::TcpListener::bind(addr).await?;
-    info!(%addr, "control plane listening");
+    info!(%addr, %udp_probe_addr, "control plane listening");
     axum::serve(
         listener,
         app.into_make_service_with_connect_info::<SocketAddr>(),
     )
     .await?;
     Ok(())
+}
+
+async fn run_udp_endpoint_probe(socket: UdpSocket) {
+    let mut buffer = [0u8; 256];
+    loop {
+        match socket.recv_from(&mut buffer).await {
+            Ok((received, source)) if &buffer[..received] == b"tfscale-public-probe-v1" => {
+                let response = format!("tfscale-public-probe-v1 {} {}", source.ip(), source.port());
+                if let Err(error) = socket.send_to(response.as_bytes(), source).await {
+                    warn!(%error, %source, "failed to send UDP endpoint probe response");
+                }
+            }
+            Ok((_received, source)) => {
+                warn!(%source, "ignored invalid UDP endpoint probe request");
+            }
+            Err(error) => {
+                warn!(%error, "UDP endpoint probe listener failed");
+                break;
+            }
+        }
+    }
 }
 
 async fn init_schema(pool: &SqlitePool) -> AnyResult<()> {
@@ -499,6 +537,8 @@ async fn endpoint_probe(
         observed_address: addr.ip().to_string(),
         observed_port: addr.port(),
         protocol: request.protocol,
+        udp_probe_address: Some(state.udp_probe_addr.ip().to_string()),
+        udp_probe_port: Some(state.udp_probe_addr.port()),
     }))
 }
 

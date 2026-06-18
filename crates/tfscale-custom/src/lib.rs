@@ -4,7 +4,7 @@ use serde::{Deserialize, Serialize};
 use std::{
     collections::HashMap,
     fs,
-    net::Ipv4Addr,
+    net::{Ipv4Addr, SocketAddr},
     path::{Path, PathBuf},
     sync::{
         Arc, Mutex,
@@ -15,7 +15,7 @@ use std::{
 };
 use tfscale_net::{
     BackendCapabilities, BackendCredential, BackendError, BackendStatus, BackendType, Endpoint,
-    LocalBackendConfig, NetworkBackend, PeerConfig, Result,
+    LocalBackendConfig, NetworkBackend, PeerConfig, PublicEndpointProbe, Result,
 };
 use uuid::Uuid;
 use x25519_dalek::{PublicKey, StaticSecret};
@@ -206,6 +206,29 @@ impl CustomBackend {
             .lock()
             .map_err(|error| BackendError::CommandFailed(error.to_string()))?
             .receive_overlay_packet(buffer)
+    }
+
+    fn probe_public_endpoint_blocking(
+        &self,
+        probe_server: SocketAddr,
+        timeout: Duration,
+    ) -> Result<Option<PublicEndpointProbe>> {
+        self.stop_transport_tasks()?;
+        let result = self
+            .state
+            .lock()
+            .map_err(|error| BackendError::CommandFailed(error.to_string()))?
+            .transport
+            .as_mut()
+            .ok_or_else(|| BackendError::CommandFailed("UDP transport is not bound".to_string()))?
+            .probe_public_endpoint(probe_server, timeout);
+        let restart_result = self.start_transport_tasks();
+
+        match (result, restart_result) {
+            (Ok(probe), Ok(())) => Ok(probe),
+            (Err(error), Ok(())) => Err(error),
+            (Ok(_), Err(error)) | (Err(_), Err(error)) => Err(error),
+        }
     }
 }
 
@@ -690,6 +713,7 @@ impl NetworkBackend for CustomBackend {
     fn capabilities(&self) -> BackendCapabilities {
         BackendCapabilities {
             supports_userspace_tun: true,
+            supports_nat_traversal: true,
             supports_static_peers: true,
             ..BackendCapabilities::default()
         }
@@ -777,6 +801,14 @@ impl NetworkBackend for CustomBackend {
             .as_ref()
             .map(TransportRuntime::local_endpoints)
             .unwrap_or_default())
+    }
+
+    async fn probe_public_endpoint(
+        &self,
+        probe_server: SocketAddr,
+        timeout: Duration,
+    ) -> Result<Option<PublicEndpointProbe>> {
+        self.probe_public_endpoint_blocking(probe_server, timeout)
     }
 
     async fn status(&self) -> Result<BackendStatus> {
@@ -1087,6 +1119,61 @@ mod tests {
         assert_eq!(endpoints[0].protocol, TransportProtocol::Udp);
         assert_ne!(endpoints[0].port, 0);
 
+        cleanup_state(&state_path);
+    }
+
+    #[tokio::test]
+    async fn probes_public_endpoint_with_backend_udp_socket() {
+        let state_path = temp_state_path("public-probe");
+        let backend = test_backend(&state_path);
+        backend
+            .apply_local_config(LocalBackendConfig {
+                device_id: DeviceId::new().to_string(),
+                interface_name: "tfscale0".to_string(),
+                overlay_ip: Ipv4Addr::new(100, 64, 0, 2),
+                listen_port: 0,
+            })
+            .await
+            .expect("local config");
+        let local_endpoint = backend
+            .local_endpoints()
+            .await
+            .expect("local endpoints")
+            .into_iter()
+            .next()
+            .expect("local endpoint");
+        let server =
+            std::net::UdpSocket::bind(std::net::SocketAddr::from((Ipv4Addr::LOCALHOST, 0)))
+                .expect("server");
+        server.set_nonblocking(true).expect("nonblocking server");
+        let server_addr = server.local_addr().expect("server addr");
+        let handle = std::thread::spawn(move || {
+            let mut buffer = [0u8; 256];
+            for _ in 0..10 {
+                match server.recv_from(&mut buffer) {
+                    Ok((_received, source)) => {
+                        let response = transport::encode_probe_response(source);
+                        server.send_to(&response, source).expect("send response");
+                        return;
+                    }
+                    Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                        std::thread::sleep(Duration::from_millis(10));
+                    }
+                    Err(error) => panic!("server receive failed: {error}"),
+                }
+            }
+            panic!("probe request not received");
+        });
+
+        let probe = backend
+            .probe_public_endpoint(server_addr, Duration::from_secs(1))
+            .await
+            .expect("probe")
+            .expect("observed endpoint");
+        handle.join().expect("server thread");
+
+        assert_eq!(probe.observed_endpoint.kind, EndpointKind::Public);
+        assert_eq!(probe.observed_endpoint.port, local_endpoint.port);
         cleanup_state(&state_path);
     }
 
