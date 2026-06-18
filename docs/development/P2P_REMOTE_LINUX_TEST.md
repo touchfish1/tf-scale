@@ -20,6 +20,144 @@
 - peer `path=unknown`：还未打通 direct。
 - peer `path=relay`：direct 失败后走 relay fallback。
 
+## 快速执行清单
+
+### 1. Control 主机
+
+```sh
+cd /path/to/tf-sacle
+git pull
+cargo build --workspace
+
+export TFSCALE_CONTROL_LISTEN=0.0.0.0:8080
+export TFSCALE_CONTROL_URL=http://<control-ip>:8080
+export TFSCALE_UDP_PROBE_LISTEN=0.0.0.0:3478
+export TFSCALE_RELAY_LISTEN=0.0.0.0:9443
+export TFSCALE_RELAY_URL=tcp://<control-ip>:9443
+
+scripts/connectivity-relay-check.sh control
+scripts/connectivity-relay-check.sh relay
+curl -fsS http://<control-ip>:8080/healthz
+```
+
+### 2. 创建两个登录 Key
+
+```sh
+key_a="$(target/debug/tfscalectl --control-url http://<control-ip>:8080 auth-key create | tail -n 1)"
+key_b="$(target/debug/tfscalectl --control-url http://<control-ip>:8080 auth-key create | tail -n 1)"
+
+echo "$key_a"
+echo "$key_b"
+```
+
+### 3. Linux A 启动 Agent
+
+```sh
+cd /path/to/tf-sacle
+git pull
+cargo build --workspace
+
+export TFSCALE_CONTROL_URL=http://<control-ip>:8080
+export TFSCALE_STATE_DIR=/var/lib/tfscale-agent-a
+
+sudo -E target/debug/tfscale-agent up \
+  --login-key "<key-a>" \
+  --control-url http://<control-ip>:8080
+```
+
+### 4. Linux B 启动 Agent
+
+```sh
+cd /path/to/tf-sacle
+git pull
+cargo build --workspace
+
+export TFSCALE_CONTROL_URL=http://<control-ip>:8080
+export TFSCALE_STATE_DIR=/var/lib/tfscale-agent-b
+
+sudo -E target/debug/tfscale-agent up \
+  --login-key "<key-b>" \
+  --control-url http://<control-ip>:8080
+```
+
+### 5. 查看 Overlay IP
+
+```sh
+target/debug/tfscalectl --control-url http://<control-ip>:8080 device list
+```
+
+记录：
+
+```text
+Agent A = 100.64.0.x
+Agent B = 100.64.0.y
+```
+
+### 6. 检查 P2P Path
+
+在两台 agent 上分别执行：
+
+```sh
+sudo -E target/debug/tfscale-agent status --json
+```
+
+重点看：
+
+```text
+path=direct
+direct_peers=1
+fast_probe_peers=0
+direct_paths=<peer>@<ip>:<port>/rtt=<n>ms
+```
+
+### 7. 验证 Overlay 通信
+
+Agent A ping Agent B：
+
+```sh
+ping -c 3 <agent-b-overlay-ip>
+```
+
+Agent B ping Agent A：
+
+```sh
+ping -c 3 <agent-a-overlay-ip>
+```
+
+### 8. 失败时立即收集
+
+两台 agent 都执行：
+
+```sh
+ip addr show tfscale0
+ip route show 100.64.0.0/10
+sudo ss -lunp | grep 51820 || true
+sudo -E target/debug/tfscale-agent status --json
+```
+
+Control 主机执行：
+
+```sh
+target/debug/tfscalectl --control-url http://<control-ip>:8080 device list
+target/debug/tfscalectl --control-url http://<control-ip>:8080 relay list
+sudo ss -lunp | grep 3478 || true
+sudo ss -ltnp | grep 8080 || true
+sudo ss -ltnp | grep 9443 || true
+```
+
+### 9. 测试结果回填模板
+
+```text
+Agent A overlay IP:
+Agent B overlay IP:
+Agent A status peers:
+Agent B status peers:
+A ping B 结果:
+B ping A 结果:
+Control relay list:
+问题日志:
+```
+
 ## 主机规划
 
 推荐准备三台 Linux 主机：
