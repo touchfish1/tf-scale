@@ -13,19 +13,27 @@ use std::net::SocketAddr;
 use tfscale_core::{
     DeviceId, NetworkId,
     protocol::{
-        CreateAuthKeyResponse, DeviceSummary, EndpointPayload, HeartbeatRequest, HeartbeatResponse,
-        NetworkMapPeer, NetworkMapResponse, NetworkMapSelf, RegisterDeviceRequest,
-        RegisterDeviceResponse, RenameDeviceRequest,
+        CreateAuthKeyResponse, DeviceSummary, EndpointPayload, EndpointProbeRequest,
+        EndpointProbeResponse, HeartbeatRequest, HeartbeatResponse, NetworkMapPeer,
+        NetworkMapResponse, NetworkMapSelf, RegisterDeviceRequest, RegisterDeviceResponse,
+        RenameDeviceRequest,
     },
 };
 use tracing::{info, warn};
 use uuid::Uuid;
 
-const MIGRATIONS: &[Migration] = &[Migration {
-    version: 1,
-    name: "initial",
-    sql: include_str!("../migrations/0001_initial.sql"),
-}];
+const MIGRATIONS: &[Migration] = &[
+    Migration {
+        version: 1,
+        name: "initial",
+        sql: include_str!("../migrations/0001_initial.sql"),
+    },
+    Migration {
+        version: 2,
+        name: "endpoint_metadata",
+        sql: include_str!("../migrations/0002_endpoint_metadata.sql"),
+    },
+];
 
 struct Migration {
     version: i64,
@@ -95,12 +103,17 @@ async fn serve(db: String, listen: String) -> AnyResult<()> {
         .route("/v1/agent/register", post(register_device))
         .route("/v1/agent/heartbeat", post(heartbeat))
         .route("/v1/agent/network-map", get(network_map))
+        .route("/v1/agent/endpoint-probe", post(endpoint_probe))
         .with_state(AppState { pool });
 
     let addr: SocketAddr = listen.parse()?;
     let listener = tokio::net::TcpListener::bind(addr).await?;
     info!(%addr, "control plane listening");
-    axum::serve(listener, app).await?;
+    axum::serve(
+        listener,
+        app.into_make_service_with_connect_info::<SocketAddr>(),
+    )
+    .await?;
     Ok(())
 }
 
@@ -437,16 +450,21 @@ async fn heartbeat(
     for endpoint in request.endpoints {
         sqlx::query(
             r#"
-            INSERT INTO endpoints (id, device_id, kind, address, port, protocol, source)
-            VALUES (?, ?, ?, ?, ?, ?, 'agent')
+            INSERT INTO endpoints (
+                id, device_id, kind, address, port, protocol, source, priority, expires_at
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
             "#,
         )
         .bind(format!("ep_{}", Uuid::now_v7().simple()))
         .bind(&request.device_id)
-        .bind(endpoint.kind)
-        .bind(endpoint.address)
+        .bind(&endpoint.kind)
+        .bind(&endpoint.address)
         .bind(i64::from(endpoint.port))
-        .bind(endpoint.protocol)
+        .bind(&endpoint.protocol)
+        .bind(endpoint.source.as_deref().unwrap_or("local"))
+        .bind(endpoint.priority.map(i64::from))
+        .bind(endpoint.expires_at)
         .execute(&mut *tx)
         .await?;
     }
@@ -456,6 +474,26 @@ async fn heartbeat(
     Ok(Json(HeartbeatResponse {
         ok: true,
         network_map_version: network_map_version(&state.pool).await?,
+    }))
+}
+
+async fn endpoint_probe(
+    State(state): State<AppState>,
+    axum::extract::ConnectInfo(addr): axum::extract::ConnectInfo<SocketAddr>,
+    Json(request): Json<EndpointProbeRequest>,
+) -> std::result::Result<Json<EndpointProbeResponse>, ApiError> {
+    validate_device_node_key(&state.pool, &request.device_id, &request.node_key).await?;
+
+    if request.protocol != "udp" {
+        return Err(ApiError::bad_request(
+            "only udp endpoint probing is supported",
+        ));
+    }
+
+    Ok(Json(EndpointProbeResponse {
+        observed_address: addr.ip().to_string(),
+        observed_port: addr.port(),
+        protocol: request.protocol,
     }))
 }
 
@@ -602,9 +640,10 @@ async fn load_endpoints(
 ) -> std::result::Result<Vec<EndpointPayload>, ApiError> {
     let rows = sqlx::query(
         r#"
-        SELECT kind, address, port, protocol
+        SELECT kind, address, port, protocol, source, priority, expires_at
         FROM endpoints
         WHERE device_id = ?
+          AND (expires_at IS NULL OR expires_at > CURRENT_TIMESTAMP)
         ORDER BY kind ASC, address ASC
         "#,
     )
@@ -619,6 +658,11 @@ async fn load_endpoints(
             address: row.get("address"),
             port: row.get::<i64, _>("port") as u16,
             protocol: row.get("protocol"),
+            source: row.get("source"),
+            priority: row
+                .get::<Option<i64>, _>("priority")
+                .map(|value| value as i32),
+            expires_at: row.get("expires_at"),
         })
         .collect())
 }
@@ -631,8 +675,12 @@ async fn network_map_version(pool: &SqlitePool) -> std::result::Result<i64, ApiE
     let endpoint_count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM endpoints")
         .fetch_one(pool)
         .await?;
+    let endpoint_timestamp_sum: i64 =
+        sqlx::query_scalar("SELECT COALESCE(SUM(unixepoch(last_seen_at)), 0) FROM endpoints")
+            .fetch_one(pool)
+            .await?;
 
-    Ok(device_count + endpoint_count)
+    Ok(device_count + endpoint_count + endpoint_timestamp_sum)
 }
 
 async fn allocate_ipv4(pool: &SqlitePool) -> std::result::Result<String, ApiError> {
@@ -770,6 +818,15 @@ mod tests {
         assert_eq!(
             statements,
             vec!["CREATE TABLE one (id TEXT)", "CREATE TABLE two (id TEXT)"]
+        );
+    }
+
+    #[test]
+    fn registers_endpoint_metadata_migration() {
+        assert_eq!(MIGRATIONS.last().expect("migration").version, 2);
+        assert_eq!(
+            MIGRATIONS.last().expect("migration").name,
+            "endpoint_metadata"
         );
     }
 }

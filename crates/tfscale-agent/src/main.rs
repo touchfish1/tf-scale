@@ -433,6 +433,9 @@ fn endpoint_to_payload(endpoint: Endpoint) -> EndpointPayload {
         address: endpoint.address.to_string(),
         port: endpoint.port,
         protocol: transport_protocol_to_payload(endpoint.protocol).to_string(),
+        source: Some("local".to_string()),
+        priority: Some(100),
+        expires_at: None,
     }
 }
 
@@ -587,12 +590,7 @@ mod tests {
                 ipv4: "100.64.0.3".to_string(),
                 backend_type: "tfscale".to_string(),
                 backend_public_credential: "peer-public-key".to_string(),
-                endpoints: vec![EndpointPayload {
-                    kind: "lan".to_string(),
-                    address: "192.168.1.30".to_string(),
-                    port: 51820,
-                    protocol: "udp".to_string(),
-                }],
+                endpoints: vec![test_endpoint_payload("lan", "192.168.1.30", 51820, "udp")],
                 allowed_routes: vec!["100.64.0.3/32".to_string()],
             }],
         };
@@ -670,12 +668,7 @@ mod tests {
             ipv4: "100.64.0.3".to_string(),
             backend_type: "tfscale".to_string(),
             backend_public_credential: "peer-public-key".to_string(),
-            endpoints: vec![EndpointPayload {
-                kind: "lan".to_string(),
-                address: "192.168.1.30".to_string(),
-                port: 51820,
-                protocol: "udp".to_string(),
-            }],
+            endpoints: vec![test_endpoint_payload("lan", "192.168.1.30", 51820, "udp")],
             allowed_routes: vec!["100.64.0.3/32".to_string()],
         }];
 
@@ -704,6 +697,9 @@ mod tests {
         assert_eq!(payload.address, "192.168.1.30");
         assert_eq!(payload.port, 51820);
         assert_eq!(payload.protocol, "udp");
+        assert_eq!(payload.source.as_deref(), Some("local"));
+        assert_eq!(payload.priority, Some(100));
+        assert_eq!(payload.expires_at, None);
     }
 
     #[test]
@@ -730,6 +726,9 @@ mod tests {
             address: "192.168.1.30".to_string(),
             port: 51820,
             protocol: "udp".to_string(),
+            source: None,
+            priority: None,
+            expires_at: None,
         };
 
         let error = endpoint_to_config(endpoint).expect_err("unknown kind should fail");
@@ -755,6 +754,23 @@ mod tests {
                 endpoints: Vec::new(),
                 allowed_routes: vec!["100.64.0.3/32".to_string()],
             }],
+        }
+    }
+
+    fn test_endpoint_payload(
+        kind: &str,
+        address: &str,
+        port: u16,
+        protocol: &str,
+    ) -> EndpointPayload {
+        EndpointPayload {
+            kind: kind.to_string(),
+            address: address.to_string(),
+            port,
+            protocol: protocol.to_string(),
+            source: None,
+            priority: None,
+            expires_at: None,
         }
     }
 }

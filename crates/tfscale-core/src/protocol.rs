@@ -49,6 +49,12 @@ pub struct EndpointPayload {
     pub address: String,
     pub port: u16,
     pub protocol: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub priority: Option<i32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expires_at: Option<String>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -70,6 +76,20 @@ pub struct HeartbeatRequest {
 pub struct HeartbeatResponse {
     pub ok: bool,
     pub network_map_version: i64,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct EndpointProbeRequest {
+    pub device_id: String,
+    pub node_key: String,
+    pub protocol: String,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct EndpointProbeResponse {
+    pub observed_address: String,
+    pub observed_port: u16,
+    pub protocol: String,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]

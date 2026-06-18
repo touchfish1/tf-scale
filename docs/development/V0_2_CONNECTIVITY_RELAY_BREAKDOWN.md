@@ -14,6 +14,10 @@
 
 ## Phase 1：Endpoint Discovery
 
+状态：协议字段、endpoint metadata migration、heartbeat 存储、peer map 过期过滤、
+HTTP endpoint-probe API 已实现。agent 自动调用 probe 并上报 public endpoint
+仍待实现。
+
 ### 目标
 
 让 agent 自动发现自己的可用 endpoint，并通过 heartbeat 上报给 control plane。
@@ -324,4 +328,3 @@ scripts/connectivity-relay-check.sh
 - relay 长连接协议要避免阻塞 backend packet loop。
 - endpoint 过期和 network_map_version 需要稳定，否则 agent 可能错过更新。
 - relay metadata 后续需要 TLS、鉴权和 region 选择生产化。
-
