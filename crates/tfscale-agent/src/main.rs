@@ -9,7 +9,11 @@ use std::{
     fs,
     net::{IpAddr, Ipv4Addr, SocketAddr},
     path::PathBuf,
-    time::Duration,
+    sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+    },
+    time::{Duration, Instant},
 };
 use tfscale_core::DeviceId;
 use tfscale_core::protocol::{
@@ -857,42 +861,105 @@ async fn run_agent_loop(
     state: &AgentState,
     last_applied_network_map_version: &mut Option<i64>,
 ) -> Result<()> {
-    let mut sync_interval =
-        tokio::time::interval(Duration::from_secs(state.poll_interval_seconds.max(1)));
-    let mut path_maintenance_interval = tokio::time::interval(DIRECT_PATH_MAINTENANCE_INTERVAL);
+    let shutdown_requested = Arc::new(AtomicBool::new(false));
+    let shutdown_signal = Arc::clone(&shutdown_requested);
+    let shutdown_task = tokio::spawn(async move {
+        match tokio::signal::ctrl_c().await {
+            Ok(()) => {
+                info!("agent shutdown requested");
+                shutdown_signal.store(true, Ordering::SeqCst);
+            }
+            Err(error) => warn!(%error, "failed to listen for Ctrl+C"),
+        }
+    });
+    let sync_interval = Duration::from_secs(state.poll_interval_seconds.max(1));
+    let now = Instant::now();
+    let mut next_sync_at = now + sync_interval;
+    let mut next_path_maintenance_at = now + DIRECT_PATH_MAINTENANCE_INTERVAL;
 
     loop {
-        tokio::select! {
-            signal = tokio::signal::ctrl_c() => {
-                signal.context("failed to listen for Ctrl+C")?;
-                info!("agent shutdown requested");
-                backend.shutdown().await?;
-                break;
+        if shutdown_requested.load(Ordering::SeqCst) {
+            backend.shutdown().await?;
+            break;
+        }
+
+        tokio::time::sleep(agent_loop_sleep_duration(
+            Instant::now(),
+            next_sync_at,
+            next_path_maintenance_at,
+        ))
+        .await;
+        let now = Instant::now();
+        let tick = next_agent_loop_tick(
+            now,
+            sync_interval,
+            &mut next_sync_at,
+            &mut next_path_maintenance_at,
+        );
+
+        if tick.sync {
+            if let Err(error) = sync_agent_once(
+                client,
+                backend,
+                dns_runtime,
+                state_dir,
+                control_url,
+                state,
+                last_applied_network_map_version,
+            )
+            .await
+            {
+                warn!(%error, "agent sync failed");
             }
-            _ = sync_interval.tick() => {
-                if let Err(error) = sync_agent_once(
-                    client,
-                    backend,
-                    dns_runtime,
-                    state_dir,
-                    control_url,
-                    state,
-                    last_applied_network_map_version,
-                )
-                .await
-                {
-                    warn!(%error, "agent sync failed");
-                }
-            }
-            _ = path_maintenance_interval.tick() => {
-                if let Err(error) = backend.maintain_peer_paths().await {
-                    warn!(%error, "peer path maintenance failed");
-                }
+        }
+
+        if tick.maintain_paths {
+            if let Err(error) = backend.maintain_peer_paths().await {
+                warn!(%error, "peer path maintenance failed");
             }
         }
     }
+    shutdown_task.abort();
 
     Ok(())
+}
+
+fn agent_loop_sleep_duration(
+    now: Instant,
+    next_sync_at: Instant,
+    next_path_maintenance_at: Instant,
+) -> Duration {
+    next_sync_at
+        .min(next_path_maintenance_at)
+        .saturating_duration_since(now)
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct AgentLoopTick {
+    sync: bool,
+    maintain_paths: bool,
+}
+
+fn next_agent_loop_tick(
+    now: Instant,
+    sync_interval: Duration,
+    next_sync_at: &mut Instant,
+    next_path_maintenance_at: &mut Instant,
+) -> AgentLoopTick {
+    let sync = now >= *next_sync_at;
+    if sync {
+        *next_sync_at = now + sync_interval;
+    }
+
+    let maintain_paths = now >= *next_path_maintenance_at;
+    if maintain_paths {
+        *next_path_maintenance_at = now + DIRECT_PATH_MAINTENANCE_INTERVAL;
+    }
+
+    AgentLoopTick {
+        sync,
+        maintain_paths,
+    }
 }
 
 async fn sync_agent_once(
@@ -1669,6 +1736,66 @@ mod tests {
         let snapshot = backend.snapshot();
         assert_eq!(snapshot.peer_maps.len(), 0);
         assert_eq!(snapshot.maintain_peer_paths_calls, 1);
+    }
+
+    #[test]
+    fn agent_loop_tick_runs_path_maintenance_before_sync_interval() {
+        let now = Instant::now();
+        let mut next_sync_at = now + Duration::from_secs(5);
+        let mut next_path_maintenance_at = now + DIRECT_PATH_MAINTENANCE_INTERVAL;
+
+        let tick = next_agent_loop_tick(
+            now + DIRECT_PATH_MAINTENANCE_INTERVAL,
+            Duration::from_secs(5),
+            &mut next_sync_at,
+            &mut next_path_maintenance_at,
+        );
+
+        assert_eq!(
+            tick,
+            AgentLoopTick {
+                sync: false,
+                maintain_paths: true,
+            }
+        );
+    }
+
+    #[test]
+    fn agent_loop_tick_runs_sync_and_path_maintenance_when_due() {
+        let now = Instant::now();
+        let mut next_sync_at = now + Duration::from_secs(5);
+        let mut next_path_maintenance_at = now + DIRECT_PATH_MAINTENANCE_INTERVAL;
+
+        let tick = next_agent_loop_tick(
+            now + Duration::from_secs(5),
+            Duration::from_secs(5),
+            &mut next_sync_at,
+            &mut next_path_maintenance_at,
+        );
+
+        assert_eq!(
+            tick,
+            AgentLoopTick {
+                sync: true,
+                maintain_paths: true,
+            }
+        );
+    }
+
+    #[test]
+    fn agent_loop_sleep_duration_uses_next_due_task() {
+        let now = Instant::now();
+        let sync_at = now + Duration::from_secs(5);
+        let path_maintenance_at = now + DIRECT_PATH_MAINTENANCE_INTERVAL;
+
+        assert_eq!(
+            agent_loop_sleep_duration(now, sync_at, path_maintenance_at),
+            DIRECT_PATH_MAINTENANCE_INTERVAL
+        );
+        assert_eq!(
+            agent_loop_sleep_duration(sync_at, sync_at, path_maintenance_at),
+            Duration::ZERO
+        );
     }
 
     #[test]
