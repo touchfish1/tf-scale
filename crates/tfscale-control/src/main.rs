@@ -343,7 +343,6 @@ async fn rename_device(
     Json(request): Json<RenameDeviceRequest>,
 ) -> std::result::Result<Json<DeviceSummary>, ApiError> {
     let hostname = normalize_hostname(&request.hostname)?;
-    ensure_hostname_available(&state.pool, &device_id, &hostname).await?;
 
     let mut tx = state.pool.begin().await?;
     let result = sqlx::query(
@@ -386,7 +385,6 @@ async fn register_device(
 
     validate_auth_key(&state.pool, &request.auth_key).await?;
     let hostname = normalize_hostname(&request.hostname)?;
-    ensure_hostname_available(&state.pool, "", &hostname).await?;
 
     let network_id = NetworkId::from("net_default".to_string());
     let device_id = DeviceId::new();
@@ -528,7 +526,7 @@ async fn upsert_device_dns_record(
     hostname: &str,
     ipv4: &str,
 ) -> std::result::Result<(), ApiError> {
-    let name = dns_name(hostname);
+    let name = available_dns_name(tx, network_id, device_id, hostname).await?;
     sqlx::query(
         r#"
         INSERT INTO dns_records (id, network_id, device_id, name, type, value)
@@ -554,28 +552,65 @@ fn dns_name(hostname: &str) -> String {
     format!("{hostname}.mesh")
 }
 
-async fn ensure_hostname_available(
-    pool: &SqlitePool,
+async fn available_dns_name(
+    tx: &mut Transaction<'_, Sqlite>,
+    network_id: &str,
     device_id: &str,
     hostname: &str,
-) -> std::result::Result<(), ApiError> {
-    let existing: Option<String> = sqlx::query_scalar(
-        r#"
-        SELECT id
-        FROM devices
-        WHERE lower(hostname) = lower(?) AND id != ? AND deleted_at IS NULL
-        "#,
-    )
-    .bind(hostname)
-    .bind(device_id)
-    .fetch_optional(pool)
-    .await?;
-
-    if existing.is_some() {
-        return Err(ApiError::conflict("hostname already in use"));
+) -> std::result::Result<String, ApiError> {
+    let base_name = dns_name(hostname);
+    if dns_name_available(tx, network_id, device_id, &base_name).await? {
+        return Ok(base_name);
     }
 
-    Ok(())
+    let suffix = device_dns_suffix(device_id);
+    let suffixed_name = dns_name(&format!("{hostname}-{suffix}"));
+    if dns_name_available(tx, network_id, device_id, &suffixed_name).await? {
+        return Ok(suffixed_name);
+    }
+
+    for attempt in 2..=99 {
+        let candidate = dns_name(&format!("{hostname}-{suffix}-{attempt}"));
+        if dns_name_available(tx, network_id, device_id, &candidate).await? {
+            return Ok(candidate);
+        }
+    }
+
+    Err(ApiError::conflict(
+        "could not allocate unique DNS name for hostname",
+    ))
+}
+
+async fn dns_name_available(
+    tx: &mut Transaction<'_, Sqlite>,
+    network_id: &str,
+    device_id: &str,
+    name: &str,
+) -> std::result::Result<bool, ApiError> {
+    let existing: Option<String> = sqlx::query_scalar(
+        r#"
+        SELECT device_id
+        FROM dns_records
+        WHERE network_id = ? AND lower(name) = lower(?) AND type = 'A' AND device_id != ?
+        "#,
+    )
+    .bind(network_id)
+    .bind(name)
+    .bind(device_id)
+    .fetch_optional(&mut **tx)
+    .await?;
+
+    Ok(existing.is_none())
+}
+
+fn device_dns_suffix(device_id: &str) -> String {
+    device_id
+        .rsplit_once('_')
+        .map(|(_, suffix)| suffix)
+        .unwrap_or(device_id)
+        .chars()
+        .take(8)
+        .collect()
 }
 
 fn normalize_hostname(value: &str) -> std::result::Result<String, ApiError> {
@@ -1105,6 +1140,12 @@ mod tests {
     }
 
     #[test]
+    fn builds_dns_suffix_from_device_id() {
+        assert_eq!(device_dns_suffix("dev_abcdef123456"), "abcdef12");
+        assert_eq!(device_dns_suffix("legacy-device"), "legacy-d");
+    }
+
+    #[test]
     fn splits_migration_statements() {
         let statements =
             migration_statements("CREATE TABLE one (id TEXT); ; CREATE TABLE two (id TEXT);")
@@ -1152,5 +1193,59 @@ mod tests {
             .expect("sqlite memory database");
 
         init_schema(&pool).await.expect("migrations");
+    }
+
+    #[tokio::test]
+    async fn dns_name_uses_hostname_until_duplicate_exists() {
+        let pool = SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect("sqlite::memory:")
+            .await
+            .expect("sqlite memory database");
+        init_schema(&pool).await.expect("migrations");
+
+        let mut tx = pool.begin().await.expect("transaction");
+        sqlx::query(
+            r#"
+            INSERT INTO dns_records (id, network_id, device_id, name, type, value)
+            VALUES ('dns_1', 'net_default', 'dev_existing', 'fedora.mesh', 'A', '100.64.0.2')
+            "#,
+        )
+        .execute(&mut *tx)
+        .await
+        .expect("insert dns record");
+
+        let available = available_dns_name(&mut tx, "net_default", "dev_abcdef123456", "fedora")
+            .await
+            .expect("available dns name");
+
+        assert_eq!(available, "fedora-abcdef12.mesh");
+    }
+
+    #[tokio::test]
+    async fn dns_name_keeps_existing_device_name_on_update() {
+        let pool = SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect("sqlite::memory:")
+            .await
+            .expect("sqlite memory database");
+        init_schema(&pool).await.expect("migrations");
+
+        let mut tx = pool.begin().await.expect("transaction");
+        sqlx::query(
+            r#"
+            INSERT INTO dns_records (id, network_id, device_id, name, type, value)
+            VALUES ('dns_1', 'net_default', 'dev_existing', 'fedora.mesh', 'A', '100.64.0.2')
+            "#,
+        )
+        .execute(&mut *tx)
+        .await
+        .expect("insert dns record");
+
+        let available = available_dns_name(&mut tx, "net_default", "dev_existing", "fedora")
+            .await
+            .expect("available dns name");
+
+        assert_eq!(available, "fedora.mesh");
     }
 }
