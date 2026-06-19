@@ -930,6 +930,13 @@ fn spawn_relay_to_tun_loop(
             return;
         }
 
+        if stream
+            .set_read_timeout(Some(Duration::from_millis(250)))
+            .is_err()
+        {
+            return;
+        }
+
         let mut reader = BufReader::new(stream);
         while !stop.load(Ordering::SeqCst) {
             let mut line = String::new();
@@ -956,6 +963,14 @@ fn spawn_relay_to_tun_loop(
                             }
                         }
                     }
+                }
+                Err(error)
+                    if matches!(
+                        error.kind(),
+                        std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
+                    ) =>
+                {
+                    continue;
                 }
                 Err(_) => break,
             }
@@ -2058,6 +2073,50 @@ mod tests {
                 && destination_device_id == "dev_b"
                 && payload == "encrypted-frame"
         ));
+    }
+
+    #[test]
+    fn relay_to_tun_loop_stops_while_waiting_for_relay_frames() {
+        let listener =
+            std::net::TcpListener::bind(std::net::SocketAddr::from((Ipv4Addr::LOCALHOST, 0)))
+                .expect("listener");
+        let addr = listener.local_addr().expect("listener addr");
+        let server_handle = std::thread::spawn(move || {
+            let (stream, _) = listener.accept().expect("accepted");
+            let mut lines = std::io::BufReader::new(stream).lines();
+            let register = lines.next().expect("register line").expect("register line");
+            let register: RelayMessage = serde_json::from_str(&register).expect("register json");
+            assert!(matches!(register, RelayMessage::Register { .. }));
+            std::thread::sleep(Duration::from_secs(2));
+        });
+        let state = Arc::new(Mutex::new(RuntimeState {
+            persisted: CustomBackendState {
+                local_config: Some(LocalBackendConfig {
+                    device_id: "dev_a".to_string(),
+                    interface_name: "tfscale0".to_string(),
+                    overlay_ip: Ipv4Addr::new(100, 64, 0, 2),
+                    listen_port: 0,
+                }),
+                ..CustomBackendState::default()
+            },
+            relays: vec![RelayConfig {
+                relay_id: "relay_1".to_string(),
+                url: format!("tcp://{addr}"),
+                region: "local".to_string(),
+            }],
+            ..RuntimeState::default()
+        }));
+        let stop = Arc::new(AtomicBool::new(false));
+        let handle = spawn_relay_to_tun_loop(state, Arc::clone(&stop)).expect("relay loop");
+
+        std::thread::sleep(Duration::from_millis(100));
+        stop.store(true, Ordering::SeqCst);
+        let started_at = SystemTime::now();
+        handle.join().expect("relay loop joins");
+        let elapsed = started_at.elapsed().expect("elapsed");
+
+        assert!(elapsed < Duration::from_secs(1));
+        server_handle.join().expect("server joins");
     }
 
     #[tokio::test]
